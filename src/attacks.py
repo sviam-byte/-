@@ -116,10 +116,7 @@ def pick_targets_for_attack(
         return sorted(nodes, key=lambda n: bc.get(n, 0.0), reverse=True)[:step_size]
 
     if attack_kind == "kcore":
-        try:
-            core = nx.core_number(G)
-        except Exception:
-            core = {n: 0 for n in nodes}
+        core = nx.core_number(G)
         return sorted(nodes, key=lambda n: core.get(n, 0), reverse=True)[:step_size]
 
     if attack_kind == "richclub_top":

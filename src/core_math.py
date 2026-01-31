@@ -73,11 +73,8 @@ def triangle_support_edge(G: nx.Graph):
 
 
 def entropy_triangle_support(G: nx.Graph) -> float:
-    """Entropy of triangle-support distribution (edge triangle counts)."""
-    try:
-        ts = triangle_support_edge(G)
-    except Exception:
-        return float("nan")
+    """Энтропия распределения triangle-support по рёбрам (число треугольников на ребро)."""
+    ts = triangle_support_edge(G)
     return entropy_histogram(ts, bins="fd")
 
 # -----------------------------
@@ -203,11 +200,7 @@ def _one_step_measure(H: nx.Graph, x) -> Dict:
     ws = []
     for y in neigh:
         d = H[x][y]
-        w = d.get("weight", 1.0)
-        try:
-            w = float(w)
-        except Exception:
-            w = 1.0
+        w = float(d.get("weight", 1.0))
         ws.append(max(0.0, w))
     s = float(sum(ws))
     if s <= 0:
@@ -424,16 +417,18 @@ def evolutionary_entropy_demetrius(G: nx.Graph, base: float = math.e) -> float:
     if A.data.size:
         A.data = np.maximum(A.data, 0.0)
 
-    try:
-        lam, u, v = _pf_eigs_sparse(A)
-    except Exception:
-        # dense fallback for tiny graphs
+    n = A.shape[0]
+    if n <= 600:
         Ad = A.toarray()
         vals, vecs = np.linalg.eig(Ad)
-        lam = float(np.real(vals[np.argmax(np.real(vals))]))
-        u = np.real(vecs[:, np.argmax(np.real(vals))])
+        idx = int(np.argmax(np.real(vals)))
+        lam = float(np.real(vals[idx]))
+        u = np.real(vecs[:, idx])
         vals2, vecs2 = np.linalg.eig(Ad.T)
-        v = np.real(vecs2[:, np.argmax(np.real(vals2))])
+        idx2 = int(np.argmax(np.real(vals2)))
+        v = np.real(vecs2[:, idx2])
+    else:
+        lam, u, v = _pf_eigs_sparse(A)
 
     if not np.isfinite(lam) or lam <= 0:
         return float("nan")
@@ -441,7 +436,6 @@ def evolutionary_entropy_demetrius(G: nx.Graph, base: float = math.e) -> float:
     u = np.abs(u) + 1e-15
     v = np.abs(v) + 1e-15
 
-    n = A.shape[0]
     P = np.zeros((n, n), dtype=float)
     A_coo = A.tocoo()
     for i, j, aij in zip(A_coo.row, A_coo.col, A_coo.data):
