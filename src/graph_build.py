@@ -2,8 +2,6 @@ import numpy as np
 import networkx as nx
 import pandas as pd
 
-
-
 def build_graph_from_edges(df_edges: pd.DataFrame, src_col: str, dst_col: str) -> nx.Graph:
     """Build a graph from an edge table and normalize weight/confidence values."""
     G = nx.from_pandas_edgelist(
@@ -13,15 +11,13 @@ def build_graph_from_edges(df_edges: pd.DataFrame, src_col: str, dst_col: str) -
         edge_attr=["weight", "confidence"],
         create_using=nx.Graph(),
     )
-    # normalize attributes
     for _, _, d in G.edges(data=True):
         w = float(d.get("weight", 1.0))
         c = float(d.get("confidence", 0.0))
-
         if not np.isfinite(w) or w <= 0:
-            w = 1e-12
+            raise ValueError(f"edge weight must be finite and >0, got {w!r}")
         if not np.isfinite(c):
-            c = 0.0
+            raise ValueError(f"edge confidence must be finite, got {c!r}")
 
         d["weight"] = w
         d["confidence"] = c

@@ -17,11 +17,11 @@ from .core_math import (
 from .utils import as_simple_undirected
 
 
-def _safe_attr_float(x, default: float = 1.0) -> float:
+def _attr_float(x) -> float:
     """Привести к float и требовать, чтобы значение было конечным."""
     v = float(x)
     if not np.isfinite(v):
-        raise ValueError("non-finite edge attribute")
+        raise ValueError(f"non-finite attribute value: {x!r}")
     return float(v)
 
 def _sample_edge_attrs_from_empirical(
@@ -34,9 +34,9 @@ def _sample_edge_attrs_from_empirical(
     d = attrs_pool[int(rng.integers(0, len(attrs_pool)))]
     out = {}
     if "weight" in d:
-        out["weight"] = _safe_attr_float(d.get("weight", 1.0), 1.0)
+        out["weight"] = _attr_float(d.get("weight", 1.0))
     if "confidence" in d:
-        out["confidence"] = _safe_attr_float(d.get("confidence", 1.0), 1.0)
+        out["confidence"] = _attr_float(d.get("confidence", 1.0))
     return out
 
 
@@ -44,16 +44,13 @@ def _edge_swap_degree_preserving(H: nx.Graph, n_swaps: int, seed: int) -> int:
     """Degree-preserving double-edge swap (best-effort)."""
     if H.number_of_edges() < 2 or H.number_of_nodes() < 4 or n_swaps <= 0:
         return 0
-    try:
-        nx.double_edge_swap(
-            H,
-            nswap=int(n_swaps),
-            max_tries=int(n_swaps) * 20,
-            seed=int(seed),
-        )
-        return int(n_swaps)
-    except Exception:
-        return 0
+    nx.double_edge_swap(
+        H,
+        nswap=int(n_swaps),
+        max_tries=int(n_swaps) * 20,
+        seed=int(seed),
+    )
+    return int(n_swaps)
 
 
 def _replace_edges_from_source(
@@ -123,10 +120,12 @@ def run_mix_attack(
 
     attrs_pool = []
     for _, _, d in H0.edges(data=True):
-        attrs_pool.append({
-            "weight": _safe_attr_float(d.get("weight", 1.0), 1.0),
-            "confidence": _safe_attr_float(d.get("confidence", 1.0), 1.0),
-        })
+        attrs_pool.append(
+            {
+                "weight": _attr_float(d.get("weight", 1.0)),
+                "confidence": _attr_float(d.get("confidence", 1.0)),
+            }
+        )
 
     if replace_from.upper() == "CFG":
         Gsrc = make_configuration_model(H0, seed=int(seed) + 999)
