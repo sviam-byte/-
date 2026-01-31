@@ -8,6 +8,7 @@ from typing import Any, Dict, Union
 GraphMetrics = Dict[str, Union[int, float, str, Any]]
 
 import numpy as np
+import pandas as pd
 import networkx as nx
 import scipy.sparse.linalg as spla
 import plotly.graph_objects as go
@@ -279,20 +280,25 @@ def calculate_metrics(
     else:
         H_deg = float("nan")
 
-    ws = []
-    cs = []
-    for _, _, d in G.edges(data=True):
-        try:
-            ws.append(float(d.get("weight", np.nan)))
-        except Exception:
-            pass
-        try:
-            cs.append(float(d.get("confidence", np.nan)))
-        except Exception:
-            pass
+    # Vectorized extraction of edge attributes for entropy calculations.
+    if G.number_of_edges() > 0:
+        edf = pd.DataFrame([d for _, _, d in G.edges(data=True)])
+        ws = (
+            pd.to_numeric(edf["weight"], errors="coerce").dropna().to_numpy()
+            if "weight" in edf
+            else np.array([])
+        )
+        cs = (
+            pd.to_numeric(edf["confidence"], errors="coerce").dropna().to_numpy()
+            if "confidence" in edf
+            else np.array([])
+        )
+    else:
+        ws = np.array([])
+        cs = np.array([])
 
-    H_w = _shannon_entropy_from_values(ws, bins=32) if ws else float("nan")
-    H_conf = _shannon_entropy_from_values(cs, bins=32) if cs else float("nan")
+    H_w = _shannon_entropy_from_values(ws, bins=32) if ws.size else float("nan")
+    H_conf = _shannon_entropy_from_values(cs, bins=32) if cs.size else float("nan")
 
     beta_red = (E - (N - C)) / float(E) if E > 0 else float("nan")
 
@@ -343,41 +349,41 @@ def calculate_metrics(
     frag_k = float(fragility_from_curvature(kappa_mean)) if np.isfinite(kappa_mean) else float("nan")
 
     return {
-        "N": int(N),
-        "E": int(E),
-        "C": int(C),
-        "density": float(dens),
-        "avg_degree": float(avg_deg),
-        "beta": int(beta),
-        "beta_red": float(beta_red) if np.isfinite(beta_red) else float("nan"),
-        "lcc_size": int(lcc_size),
-        "lcc_frac": float(lcc_frac),
-        "eff_w": float(eff_w),
-        "l2_lcc": float(l2),
-        "tau_lcc": float(tau),
-        "tau_relax": float(tau_relax) if np.isfinite(tau_relax) else float("nan"),
-        "lmax": float(lmax),
-        "thresh": float(thresh),
-        "epi_thr": float(epi_thr) if np.isfinite(epi_thr) else float("nan"),
-        "mod": float(Q),
-        "entropy_deg": float(ent),
-        "H_deg": float(H_deg) if np.isfinite(H_deg) else float("nan"),
-        "H_w": float(H_w) if np.isfinite(H_w) else float("nan"),
-        "H_conf": float(H_conf) if np.isfinite(H_conf) else float("nan"),
-        "assortativity": float(assort) if np.isfinite(assort) else 0.0,
-        "clustering": float(clust) if np.isfinite(clust) else 0.0,
-        "diameter_approx": int(diam) if diam is not None else None,
+        "N": N,
+        "E": E,
+        "C": C,
+        "density": dens,
+        "avg_degree": avg_deg,
+        "beta": beta,
+        "beta_red": beta_red,
+        "lcc_size": lcc_size,
+        "lcc_frac": lcc_frac,
+        "eff_w": eff_w,
+        "l2_lcc": l2,
+        "tau_lcc": tau,
+        "tau_relax": tau_relax,
+        "lmax": lmax,
+        "thresh": thresh,
+        "epi_thr": epi_thr,
+        "mod": Q,
+        "entropy_deg": ent,
+        "H_deg": H_deg,
+        "H_w": H_w,
+        "H_conf": H_conf,
+        "assortativity": assort,
+        "clustering": clust,
+        "diameter_approx": diam,
 
-        "H_rw": float(H_rw) if np.isfinite(H_rw) else float("nan"),
-        "H_evo": float(H_evo) if np.isfinite(H_evo) else float("nan"),
-        "kappa_mean": float(kappa_mean) if np.isfinite(kappa_mean) else float("nan"),
-        "kappa_median": float(kappa_median) if np.isfinite(kappa_median) else float("nan"),
-        "kappa_frac_negative": float(kappa_frac_negative) if np.isfinite(kappa_frac_negative) else float("nan"),
-        "kappa_computed_edges": int(kappa_computed_edges),
-        "kappa_skipped_edges": int(kappa_skipped_edges),
-        "fragility_H": float(frag_H) if np.isfinite(frag_H) else float("nan"),
-        "fragility_evo": float(frag_evo) if np.isfinite(frag_evo) else float("nan"),
-        "fragility_kappa": float(frag_k) if np.isfinite(frag_k) else float("nan"),
+        "H_rw": H_rw,
+        "H_evo": H_evo,
+        "kappa_mean": kappa_mean,
+        "kappa_median": kappa_median,
+        "kappa_frac_negative": kappa_frac_negative,
+        "kappa_computed_edges": kappa_computed_edges,
+        "kappa_skipped_edges": kappa_skipped_edges,
+        "fragility_H": frag_H,
+        "fragility_evo": frag_evo,
+        "fragility_kappa": frag_k,
     }
 
 
