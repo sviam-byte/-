@@ -46,7 +46,7 @@ from src.metrics import (
 )
 from src.core_math import ollivier_ricci_edge
 from src.null_models import make_er_gnm, make_configuration_model, rewire_mix
-from src.attacks import run_attack 
+from src.attacks import run_attack
 from src.attacks_mix import run_mix_attack
 from src.plotting import fig_metrics_over_steps, fig_compare_attacks
 from src.core_math import classify_phase_transition
@@ -69,6 +69,7 @@ from src.state_models import (
     build_graph_entry,
 )
 from src.utils import as_simple_undirected, get_node_strength
+from src.graph_wrapper import GraphWrapper
 
 # -----------------------------
 # Streamlit caching helpers
@@ -77,8 +78,6 @@ from src.utils import as_simple_undirected, get_node_strength
 def _filter_edges_cached(
     graph_id: str,
     df_hash: str,
-    src_col: str,
-    dst_col: str,
     min_conf: float,
     min_weight: float,
 ) -> pd.DataFrame:
@@ -100,7 +99,7 @@ def _build_graph_cached(
     analysis_mode: str,
 ) -> nx.Graph:
     """Build NetworkX graph once per filter + analysis mode settings."""
-    df_filtered = _filter_edges_cached(graph_id, df_hash, src_col, dst_col, min_conf, min_weight)
+    df_filtered = _filter_edges_cached(graph_id, df_hash, min_conf, min_weight)
     G = build_graph_from_edges(df_filtered, src_col, dst_col)
     if analysis_mode.startswith("LCC"):
         G = lcc_subgraph(G)
@@ -541,8 +540,8 @@ def run_edge_attack(
 def _init_state():
     """Ensure session state is initialized with stable defaults."""
     defaults = {
-        "graphs": {},                 
-        "experiments": [],            
+        "graphs": {},
+        "experiments": [],
         "active_graph_id": None,
         "seed": settings.DEFAULT_SEED,
         "last_upload_hash": None,
@@ -551,6 +550,7 @@ def _init_state():
         "last_multi_curves": None,
         "last_exp_id": None,
         "__decomp_step": 0,
+        "graph_wrappers": {},
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -799,6 +799,7 @@ with st.sidebar:
                     gs, ex = import_workspace_json(up_ws.getvalue())
                     st.session_state["graphs"] = gs
                     st.session_state["experiments"] = ex
+                    st.session_state["graph_wrappers"] = {}
                     if gs:
                         st.session_state["active_graph_id"] = list(gs.keys())[0]
                     st.success("Workspace загружен!")
@@ -880,6 +881,7 @@ with st.sidebar:
         st.session_state["last_exp_id"] = None
         st.session_state["last_upload_hash"] = None
         st.session_state["__decomp_step"] = 0
+        st.session_state["graph_wrappers"] = {}
         st.rerun()
 
 # ============================================================
@@ -995,8 +997,6 @@ df_hash = hashlib.md5(pd.util.hash_pandas_object(df_edges).values).hexdigest()
 df_filtered = _filter_edges_cached(
     active_entry.id,
     df_hash,
-    src_col,
-    dst_col,
     float(min_conf),
     float(min_weight),
 )
@@ -1061,6 +1061,7 @@ metrics_cache_key = f"metrics_{graph_key}"
 G_full = None
 G_view = None
 met = None
+graph_wrapper = None
 
 # Centralized load trigger to ensure heavy work happens only after explicit rerun.
 load_graph = bool(st.session_state.pop("__do_load_graph", False))
@@ -1085,6 +1086,7 @@ if load_graph:
             float(min_weight),
             analysis_mode,
         )
+        graph_wrapper = _get_graph_wrapper(graph_key, G_view, active_entry)
     with st.spinner("Считаю метрики…"):
         met = _metrics_cached(
             active_entry.id,
@@ -1124,6 +1126,7 @@ elif metrics_cache_key in st.session_state:
         float(min_weight),
         analysis_mode,
     )
+    graph_wrapper = _get_graph_wrapper(graph_key, G_view, active_entry)
     met = st.session_state.get(metrics_cache_key)
 else:
     # При пустом состоянии показываем общий prompt, чтобы не дублировать его в табах.
@@ -1137,11 +1140,11 @@ else:
 curvature_cache_key = (
     f"curvature_{graph_key}|{int(st.session_state.get('__curvature_sample_edges', 80))}|{int(seed_val)}"
 )
-if (G_view is not None) and st.session_state.get("__compute_curvature_now"):
+if (graph_wrapper is not None) and st.session_state.get("__compute_curvature_now"):
     st.session_state["__compute_curvature_now"] = False
     with st.spinner("Считаю Ricci (это может занять время)…"):
         curvature_result = compute_curvature_cached(
-            G_view,
+            graph_wrapper,
             sample_edges=int(st.session_state.get("__curvature_sample_edges", 80)),
             seed=int(seed_val),
         )

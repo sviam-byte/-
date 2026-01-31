@@ -1,7 +1,6 @@
 import streamlit as st
 
 import networkx as nx
-import numpy as np
 import pandas as pd
 
 from src.core_math import fragility_from_curvature, ollivier_ricci_summary
@@ -11,11 +10,7 @@ from src.graph_wrapper import GraphWrapper
 
 @st.cache_resource(show_spinner=False)
 def build_graph(df: pd.DataFrame) -> nx.Graph:
-    """Build a NetworkX graph from a pandas edge list.
-
-    This is intentionally cached because turning large dataframes into graphs
-    is one of the most expensive UI steps.
-    """
+    """Build a NetworkX graph from a pandas edge list (cached by dataframe content)."""
     return nx.from_pandas_edgelist(df, "src", "dst", edge_attr=True)
 
 
@@ -27,17 +22,14 @@ def compute_layout(wrapper: GraphWrapper) -> dict:
 
 @st.cache_data(show_spinner=False)
 def compute_curvature(
-    G: nx.Graph,
+    wrapper: GraphWrapper,
     sample_edges: int = 150,
     seed: int = settings.DEFAULT_SEED,
     max_support: int = settings.RICCI_MAX_SUPPORT,
     cutoff: float = settings.RICCI_CUTOFF,
 ) -> dict:
-    """Compute Ollivier–Ricci curvature summary metrics for a graph.
-
-    The return shape mirrors the metrics dict used in the app so results can be
-    merged into the cached metrics payload when the user explicitly requests it.
-    """
+    """Compute Ricci curvature summary using GraphWrapper for O(1) caching."""
+    G = wrapper.G
     if G.number_of_edges() == 0:
         return {
             "kappa_mean": float("nan"),

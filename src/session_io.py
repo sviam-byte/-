@@ -78,7 +78,32 @@ def _b64_csv_to_df(s: str) -> pd.DataFrame:
     return pd.read_csv(pd.io.common.BytesIO(raw))
 
 
-def export_workspace_json(graphs: dict, experiments: list) -> bytes:
+def _graph_entry_payload(entry: GraphEntry) -> dict:
+    """Convert a GraphEntry into a serializable payload."""
+    return {
+        "id": entry.id,
+        "name": entry.name,
+        "source": entry.source,
+        "tags": entry.meta_tags,
+        "created_at": entry.created_at,
+        "edges_b64": _df_to_b64_csv(entry.edges_df),
+    }
+
+
+def _experiment_payload(exp: ExperimentData) -> dict:
+    """Convert an ExperimentData object into a serializable payload."""
+    return {
+        "id": exp.id,
+        "name": exp.name,
+        "graph_id": exp.graph_id,
+        "attack_kind": exp.attack_kind,
+        "params": exp.params,
+        "created_at": exp.created_at,
+        "history_b64": _df_to_b64_csv(exp.history),
+    }
+
+
+def export_workspace_json(graphs: dict, experiments: list[ExperimentData]) -> bytes:
     """
     graphs: dict[gid] -> GraphEntry or legacy dict payloads.
     experiments: list -> ExperimentEntry or legacy dict payloads.
@@ -135,7 +160,7 @@ def export_workspace_json(graphs: dict, experiments: list) -> bytes:
     return _json_dumps_bytes(payload)
 
 
-def import_workspace_json(blob: bytes) -> tuple[dict, list]:
+def import_workspace_json(blob: bytes) -> tuple[dict, list[ExperimentData]]:
     """Load workspace graphs and experiments from a JSON blob."""
     payload = json.loads(blob.decode("utf-8"))
     graphs_raw = payload.get("graphs", {})
@@ -173,7 +198,7 @@ def import_workspace_json(blob: bytes) -> tuple[dict, list]:
     return graphs, exps
 
 
-def export_experiments_json(experiments: list) -> bytes:
+def export_experiments_json(experiments: list[ExperimentData]) -> bytes:
     """Export experiments only (without graph storage) as JSON bytes."""
     e_out = []
     for e in experiments:
@@ -205,7 +230,7 @@ def export_experiments_json(experiments: list) -> bytes:
     return _json_dumps_bytes(payload)
 
 
-def import_experiments_json(blob: bytes) -> list:
+def import_experiments_json(blob: bytes) -> list[ExperimentData]:
     """Import experiments from JSON bytes."""
     payload = json.loads(blob.decode("utf-8"))
     exps_raw = payload.get("experiments", [])

@@ -36,7 +36,11 @@ def entropy_histogram(x, bins="fd") -> float:
 
 def entropy_degree(G: nx.Graph) -> float:
     """Entropy of the degree distribution."""
-    return entropy_histogram([d for _, d in G.degree()], bins="fd")
+    degrees = np.fromiter((d for _, d in G.degree()), dtype=float)
+    if degrees.size == 0:
+        return float("nan")
+    _, counts = np.unique(degrees, return_counts=True)
+    return float(scipy_entropy(counts))
 
 
 def entropy_weights(G: nx.Graph) -> float:
