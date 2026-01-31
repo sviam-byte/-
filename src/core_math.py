@@ -45,26 +45,22 @@ def entropy_degree(G: nx.Graph) -> float:
 
 def entropy_weights(G: nx.Graph) -> float:
     """Entropy of edge weight distribution."""
-    ws = []
+    vals: list[float] = []
     for _, _, d in G.edges(data=True):
-        w = d.get("weight", 1.0)
-        try:
-            ws.append(float(w))
-        except Exception:
-            ws.append(1.0)
-    return entropy_histogram(ws, bins="fd")
+        w = float(d.get("weight", 1.0))
+        if np.isfinite(w) and w > 0:
+            vals.append(w)
+    return entropy_histogram(vals, bins="fd")
 
 
 def entropy_confidence(G: nx.Graph) -> float:
     """Entropy of edge confidence distribution."""
-    cs = []
+    vals: list[float] = []
     for _, _, d in G.edges(data=True):
-        c = d.get("confidence", 1.0)
-        try:
-            cs.append(float(c))
-        except Exception:
-            cs.append(1.0)
-    return entropy_histogram(cs, bins="fd")
+        c = float(d.get("confidence", 1.0))
+        if np.isfinite(c) and c > 0:
+            vals.append(c)
+    return entropy_histogram(vals, bins="fd")
 
 
 def triangle_support_edge(G: nx.Graph):
@@ -77,11 +73,8 @@ def triangle_support_edge(G: nx.Graph):
 
 
 def entropy_triangle_support(G: nx.Graph) -> float:
-    """Entropy of triangle-support distribution (edge triangle counts)."""
-    try:
-        ts = triangle_support_edge(G)
-    except Exception:
-        return float("nan")
+    """Энтропия распределения triangle-support по рёбрам (число треугольников на ребро)."""
+    ts = triangle_support_edge(G)
     return entropy_histogram(ts, bins="fd")
 
 # -----------------------------
@@ -141,7 +134,10 @@ def classify_phase_transition(
 # Robust geometry / curvature
 # -----------------------------
 def add_dist_attr(G: nx.Graph) -> nx.Graph:
-    """Копия графа + атрибут dist=1/weight для путей."""
+    """Копия графа + атрибут dist=1/weight для путей.
+
+    Некорректные веса заменяются малым положительным значением, чтобы не падать.
+    """
     H = G.copy()
     for _, _, d in H.edges(data=True):
         w_raw = d.get("weight", 1.0)
@@ -156,22 +152,23 @@ def add_dist_attr(G: nx.Graph) -> nx.Graph:
 
 
 def _normalize_edge_weights(G: nx.Graph) -> nx.Graph:
-    """Нормализовать веса рёбер: finite и >=0."""
-    for _, _, d in G.edges(data=True):
+    """Нормализовать веса рёбер: finite и >=0 (best-effort)."""
+    H = G.copy()
+    for _, _, d in H.edges(data=True):
         w_raw = d.get("weight", 1.0)
         try:
             w = float(w_raw)
         except (TypeError, ValueError):
             w = 1.0
-        if not np.isfinite(w):
+        if not np.isfinite(w) or w <= 0:
             w = 1.0
-        d["weight"] = max(0.0, w)
-    return G
+        d["weight"] = w
+    return H
 
 # -----------------------------
 # 1) Entropy rate of random walk
 # -----------------------------
-def network_entropy_rate(G: nx.Graph, base: float = math.e, **_ignored) -> float:
+def network_entropy_rate(G: nx.Graph, base: float = math.e) -> float:
     """
     Entropy rate:
         H_rw = - Σ_i π_i Σ_j P_ij log P_ij
@@ -207,11 +204,7 @@ def _one_step_measure(H: nx.Graph, x) -> Dict:
     ws = []
     for y in neigh:
         d = H[x][y]
-        w = d.get("weight", 1.0)
-        try:
-            w = float(w)
-        except Exception:
-            w = 1.0
+        w = float(d.get("weight", 1.0))
         ws.append(max(0.0, w))
     s = float(sum(ws))
     if s <= 0:
@@ -386,13 +379,13 @@ def ollivier_ricci_summary(
 # -----------------------------
 # 3) Fragility proxies
 # -----------------------------
-def fragility_from_entropy(h: float, eps: float = 1e-9, **_ignored) -> float:
+def fragility_from_entropy(h: float, eps: float = 1e-9) -> float:
     if not np.isfinite(h):
         return float("nan")
     return float(1.0 / max(eps, float(h)))
 
 
-def fragility_from_curvature(kappa_mean: float, eps: float = 1e-9, **_ignored) -> float:
+def fragility_from_curvature(kappa_mean: float, eps: float = 1e-9) -> float:
     if not np.isfinite(kappa_mean):
         return float("nan")
     return float(1.0 / max(eps, 1.0 + float(kappa_mean)))
@@ -411,7 +404,7 @@ def _pf_eigs_sparse(A):
     return lam, u, v
 
 
-def evolutionary_entropy_demetrius(G: nx.Graph, base: float = math.e, **_ignored) -> float:
+def evolutionary_entropy_demetrius(G: nx.Graph, base: float = math.e) -> float:
     """
     Build PF-Markov chain from adjacency A and compute entropy rate:
       P_ij = a_ij * u_j / (lam * u_i),  π_i ∝ u_i v_i
@@ -428,16 +421,18 @@ def evolutionary_entropy_demetrius(G: nx.Graph, base: float = math.e, **_ignored
     if A.data.size:
         A.data = np.maximum(A.data, 0.0)
 
-    try:
-        lam, u, v = _pf_eigs_sparse(A)
-    except Exception:
-        # dense fallback for tiny graphs
+    n = A.shape[0]
+    if n <= 600:
         Ad = A.toarray()
         vals, vecs = np.linalg.eig(Ad)
-        lam = float(np.real(vals[np.argmax(np.real(vals))]))
-        u = np.real(vecs[:, np.argmax(np.real(vals))])
+        idx = int(np.argmax(np.real(vals)))
+        lam = float(np.real(vals[idx]))
+        u = np.real(vecs[:, idx])
         vals2, vecs2 = np.linalg.eig(Ad.T)
-        v = np.real(vecs2[:, np.argmax(np.real(vals2))])
+        idx2 = int(np.argmax(np.real(vals2)))
+        v = np.real(vecs2[:, idx2])
+    else:
+        lam, u, v = _pf_eigs_sparse(A)
 
     if not np.isfinite(lam) or lam <= 0:
         return float("nan")
@@ -445,7 +440,6 @@ def evolutionary_entropy_demetrius(G: nx.Graph, base: float = math.e, **_ignored
     u = np.abs(u) + 1e-15
     v = np.abs(v) + 1e-15
 
-    n = A.shape[0]
     P = np.zeros((n, n), dtype=float)
     A_coo = A.tocoo()
     for i, j, aij in zip(A_coo.row, A_coo.col, A_coo.data):

@@ -116,10 +116,7 @@ def pick_targets_for_attack(
         return sorted(nodes, key=lambda n: bc.get(n, 0.0), reverse=True)[:step_size]
 
     if attack_kind == "kcore":
-        try:
-            core = nx.core_number(G)
-        except Exception:
-            core = {n: 0 for n in nodes}
+        core = nx.core_number(G)
         return sorted(nodes, key=lambda n: core.get(n, 0), reverse=True)[:step_size]
 
     if attack_kind == "richclub_top":
@@ -231,8 +228,7 @@ def run_edge_attack(
     compute_curvature: bool = False,
     curvature_sample_edges: int = 80,
 ):
-    """
-    Edge-removal attack using weight/confidence, flux, or Ricci-based rankings.
+    """Edge-removal attack using weight/confidence, flux, or Ricci-based rankings.
 
     Returns df_hist and aux, where aux contains removed edge order for downstream UI.
     """
@@ -254,6 +250,9 @@ def run_edge_attack(
     edges = list(H0.edges(data=True))
     kind = str(kind)
 
+    # --------------------------
+    # Cheap rankings by attributes
+    # --------------------------
     def _safe_float(value, default: float = 0.0) -> float:
         """Convert to float with finite fallback for edge attributes."""
         try:
@@ -262,9 +261,6 @@ def run_edge_attack(
             return float(default)
         return v if np.isfinite(v) else float(default)
 
-    # --------------------------
-    # Cheap rankings by attributes
-    # --------------------------
     if kind in (
         "weak_edges_by_weight",
         "weak_edges_by_confidence",
@@ -275,7 +271,6 @@ def run_edge_attack(
             key = lambda e: _safe_float(e[2].get("confidence", 1.0), 1.0)
         else:
             key = lambda e: _safe_float(e[2].get("weight", 1.0), 1.0)
-
         edges.sort(key=key, reverse=kind.startswith("strong_"))
 
     else:
@@ -291,8 +286,8 @@ def run_edge_attack(
         else:
             sampled = edge_list
 
-        kappa = {}
-        flux = {}
+        kappa: dict[tuple, float] = {}
+        flux: dict[tuple, float] = {}
 
         # Flux precompute (RW / Evo).
         if kind in ("flux_high_rw", "flux_high_evo", "flux_high_rw_x_neg_ricci"):
@@ -316,18 +311,21 @@ def run_edge_attack(
                     )
                 except (ValueError, RuntimeError):
                     val = None
-                if val is None or not np.isfinite(val):
+                if val is None:
                     continue
-                kappa[(u, v)] = float(val)
+                val = _safe_float(val, default=float("nan"))
+                if not np.isfinite(val):
+                    continue
+                kappa[(u, v)] = val
 
-        def _flux_uv(u, v) -> float:
+        def flux_uv(u, v) -> float:
             if (u, v) in flux:
                 return _safe_float(flux[(u, v)], 0.0)
             if (v, u) in flux:
                 return _safe_float(flux[(v, u)], 0.0)
             return 0.0
 
-        def _kappa_uv(u, v) -> float:
+        def kappa_uv(u, v) -> float:
             if (u, v) in kappa:
                 return _safe_float(kappa[(u, v)], 0.0)
             if (v, u) in kappa:
@@ -336,17 +334,17 @@ def run_edge_attack(
 
         def score(u, v, d) -> float:
             if kind == "flux_high_rw":
-                return _flux_uv(u, v)
+                return flux_uv(u, v)
             if kind == "flux_high_evo":
-                return _flux_uv(u, v)
+                return flux_uv(u, v)
             if kind == "ricci_most_negative":
-                return -_kappa_uv(u, v)
+                return -kappa_uv(u, v)
             if kind == "ricci_most_positive":
-                return _kappa_uv(u, v)
+                return kappa_uv(u, v)
             if kind == "ricci_abs_max":
-                return abs(_kappa_uv(u, v))
+                return abs(kappa_uv(u, v))
             if kind == "flux_high_rw_x_neg_ricci":
-                return _flux_uv(u, v) * max(0.0, -_kappa_uv(u, v))
+                return flux_uv(u, v) * max(0.0, -kappa_uv(u, v))
             return _safe_float(d.get("weight", 1.0), 1.0)
 
         edges.sort(key=lambda e: score(e[0], e[1], e[2]), reverse=True)

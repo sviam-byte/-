@@ -20,6 +20,7 @@ st.write("UI loaded")
 
 import uuid
 import hashlib
+import json
 import textwrap
 import time
 
@@ -302,13 +303,9 @@ def _fallback_removal_order(G: nx.Graph, kind: str, seed: int):
         return nodes
 
     if kind in ("kcore",):
-        try:
-            core = nx.core_number(H)
-            nodes.sort(key=lambda n: core.get(n, 0), reverse=True)
-            return nodes
-        except Exception:
-            nodes.sort(key=lambda n: H.degree(n), reverse=True)
-            return nodes
+        core = nx.core_number(H)
+        nodes.sort(key=lambda n: core.get(n, 0), reverse=True)
+        return nodes
 
     if kind in ("richclub_top",):
         nodes.sort(key=lambda n: get_node_strength(H, n), reverse=True)
@@ -325,17 +322,13 @@ def _compute_metrics_snapshot(
     compute_curvature: bool,
     curvature_sample_edges: int,
 ):
-    """
-    Safe wrapper around calculate_metrics.
-    If heavy=False: we still call calculate_metrics, but pass smaller eff_k upstream (already controlled by caller).
-    Heavy gating is handled by caller by skipping/ffill some columns.
-    """
+    """Safe wrapper around calculate_metrics with optional heavy metrics."""
     m = calculate_metrics(
         G,
-        eff_sources_k=int(eff_k),
-        seed=int(seed),
-        compute_curvature=bool(compute_curvature and heavy),
-        curvature_sample_edges=int(curvature_sample_edges),
+        eff_sources_k=eff_k,
+        seed=seed,
+        compute_curvature=(compute_curvature and heavy),
+        curvature_sample_edges=curvature_sample_edges,
     )
     return m
 
@@ -611,8 +604,8 @@ with st.sidebar:
                         st.session_state["active_graph_id"] = list(gs.keys())[0]
                     st.success("Workspace загружен!")
                     st.rerun()
-                except Exception as e:
-                    st.error(f"Error: {e}")
+                except (json.JSONDecodeError, KeyError, ValueError) as e:
+                    st.exception(e)
 
         with tab_io2:
             if st.button("Export Exps Only"):
@@ -627,8 +620,8 @@ with st.sidebar:
                         st.session_state["experiments"].extend(ex)
                     st.success("Experiments импортированы!")
                     st.rerun()
-                except Exception as e:
-                    st.error(f"Error: {e}")
+                except (json.JSONDecodeError, KeyError, ValueError) as e:
+                    st.exception(e)
 
     st.markdown("---")
     st.subheader("📂 Загрузка данных")
@@ -651,8 +644,8 @@ with st.sidebar:
                 st.session_state["last_upload_hash"] = file_hash
                 st.toast(f"Граф {uploaded_file.name} успешно добавлен!", icon="✅")
                 st.rerun()
-            except Exception as e:
-                st.error(f"Ошибка парсинга: {e}")
+            except (ValueError, KeyError, pd.errors.ParserError, UnicodeDecodeError) as e:
+                st.exception(e)
 
     st.markdown("---")
     st.subheader("⚙️ Глобальные фильтры")

@@ -41,7 +41,7 @@ def rewire_mix(G_base: nx.Graph, p: float, seed: int) -> nx.Graph:
     try:
         nx.double_edge_swap(H, nswap=swaps, max_tries=tries, seed=int(seed))
     except Exception:
-        # if swap fails due to constraints, return what we have
+        # Если swap невозможен из-за ограничений, возвращаем что есть.
         pass
 
     H.remove_edges_from(nx.selfloop_edges(H))
