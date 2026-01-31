@@ -34,17 +34,7 @@ from compute import compute_curvature as compute_curvature_cached
 from src.io_load import load_uploaded_any
 from src.preprocess import coerce_fixed_format, filter_edges
 from src.graph_build import build_graph_from_edges, lcc_subgraph
-from src.config import (
-    ANIMATION_DURATION_MS,
-    APPROX_EFFICIENCY_K,
-    DEFAULT_DAMPING,
-    DEFAULT_INJECTION,
-    DEFAULT_LEAK,
-    DEFAULT_SEED,
-    PLOT_HEIGHT,
-    RICCI_CUTOFF,
-    RICCI_MAX_SUPPORT,
-)
+from src.config import settings
 from src.metrics import (
     calculate_metrics,
     compute_3d_layout,
@@ -55,7 +45,7 @@ from src.metrics import (
 )
 from src.core_math import ollivier_ricci_edge
 from src.null_models import make_er_gnm, make_configuration_model, rewire_mix
-from src.attacks import run_attack 
+from src.attacks import run_attack
 from src.attacks_mix import run_mix_attack
 from src.plotting import fig_metrics_over_steps, fig_compare_attacks
 from src.core_math import classify_phase_transition
@@ -72,7 +62,9 @@ from src.session_io import (
     export_experiments_json,
     import_experiments_json,
 )
+from src.state import GraphEntry, ExperimentData
 from src.utils import as_simple_undirected, get_node_strength
+from src.graph_wrapper import GraphWrapper
 
 # -----------------------------
 # Streamlit caching helpers
@@ -88,7 +80,7 @@ def _filter_edges_cached(
 ) -> pd.DataFrame:
     """Cache-friendly wrapper around filter_edges keyed by graph ID + data hash."""
     entry = st.session_state["graphs"][graph_id]
-    return filter_edges(entry["edges"], src_col, dst_col, min_conf, min_weight)
+    return filter_edges(entry.edges_df, src_col, dst_col, min_conf, min_weight)
 
 
 @st.cache_resource(show_spinner=False)
@@ -126,7 +118,7 @@ def _metrics_cached(
     G = _build_graph_cached(graph_id, df_hash, src_col, dst_col, min_conf, min_weight, analysis_mode)
     return calculate_metrics(
         G,
-        eff_sources_k=APPROX_EFFICIENCY_K,
+        eff_sources_k=settings.APPROX_EFFICIENCY_K,
         seed=int(seed),
         compute_curvature=bool(compute_curvature),
         curvature_sample_edges=int(curvature_sample_edges),
@@ -427,8 +419,8 @@ def run_edge_attack(
                         H0,
                         u,
                         v,
-                        max_support=RICCI_MAX_SUPPORT,
-                        cutoff=RICCI_CUTOFF,
+                        max_support=settings.RICCI_MAX_SUPPORT,
+                        cutoff=settings.RICCI_CUTOFF,
                     )
                 except Exception:
                     val = None
@@ -543,16 +535,17 @@ def run_edge_attack(
 def _init_state():
     """Ensure session state is initialized with stable defaults."""
     defaults = {
-        "graphs": {},                 
-        "experiments": [],            
+        "graphs": {},
+        "experiments": [],
         "active_graph_id": None,
-        "seed": DEFAULT_SEED,
+        "seed": settings.DEFAULT_SEED,
         "last_upload_hash": None,
         "layout_seed_bump": 0,
         "last_suite_curves": None,
         "last_multi_curves": None,
         "last_exp_id": None,
         "__decomp_step": 0,
+        "graph_wrappers": {},
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -560,36 +553,49 @@ def _init_state():
 
 _init_state()
 
+def _get_graph_wrapper(graph_key: str, G: nx.Graph, entry: GraphEntry) -> GraphWrapper:
+    """Return a stable wrapper for caching operations tied to a graph key."""
+    wrappers = st.session_state["graph_wrappers"]
+    wrapper = wrappers.get(graph_key)
+    if wrapper is None:
+        wrapper = GraphWrapper(G, entry.name, entry.source)
+        wrappers[graph_key] = wrapper
+        return wrapper
+
+    if wrapper.G is not G:
+        wrapper.update_graph(G)
+    return wrapper
+
 def add_graph(name: str, df_edges: pd.DataFrame, source: str, tags=None) -> str:
     gid = new_id("G")
-    st.session_state["graphs"][gid] = {
-        "id": gid,
-        "name": name,
-        "source": source,
-        "tags": tags or {},
-        "edges": df_edges.copy(),
-        "created_at": time.time(),
-    }
+    st.session_state["graphs"][gid] = GraphEntry(
+        id=gid,
+        name=name,
+        source=source,
+        edges_df=df_edges.copy(),
+        meta_tags=tags or {},
+    )
     st.session_state["active_graph_id"] = gid
     return gid
 
 def save_experiment(name: str, graph_id: str, kind: str, params: dict, df_hist: pd.DataFrame):
     eid = new_id("EXP")
-    st.session_state["experiments"].append({
-        "id": eid,
-        "name": name,
-        "graph_id": graph_id,
-        "attack_kind": kind,
-        "params": params,
-        "history": df_hist.copy(),
-        "created_at": time.time(),
-    })
+    st.session_state["experiments"].append(
+        ExperimentData(
+            id=eid,
+            name=name,
+            graph_id=graph_id,
+            attack_kind=kind,
+            params=params,
+            history=df_hist.copy(),
+        )
+    )
     st.session_state["last_exp_id"] = eid
     return eid
 
 def run_node_attack_suite(
     G: nx.Graph,
-    graph_entry: dict,
+    graph_entry: GraphEntry,
     preset_spec: list,
     frac: float,
     steps: int,
@@ -622,13 +628,13 @@ def run_node_attack_suite(
 
             phase_info = classify_phase_transition(df_hist)
 
-            label = f"{graph_entry['name']} | {kind} | seed={seed_i}"
+            label = f"{graph_entry.name} | {kind} | seed={seed_i}"
             if tag:
                 label += f" [{tag}]"
 
             save_experiment(
                 name=label,
-                graph_id=graph_entry["id"],
+                graph_id=graph_entry.id,
                 kind=kind,
                 params={
                     "attack_family": "node",
@@ -717,7 +723,7 @@ def emulate_node_attack_from_order(
 
 def run_edge_attack_suite(
     G: nx.Graph,
-    graph_entry: dict,
+    graph_entry: GraphEntry,
     preset_spec: list,
     frac: float,
     steps: int,
@@ -739,13 +745,13 @@ def run_edge_attack_suite(
             df_hist = _forward_fill_heavy(df_hist)
             phase_info = classify_phase_transition(df_hist)
 
-            label = f"{graph_entry['name']} | {kind} | seed={seed_i}"
+            label = f"{graph_entry.name} | {kind} | seed={seed_i}"
             if tag:
                 label += f" [{tag}]"
 
             save_experiment(
                 name=label,
-                graph_id=graph_entry["id"],
+                graph_id=graph_entry.id,
                 kind=kind,
                 params={
                     "attack_family": "edge",
@@ -783,6 +789,7 @@ with st.sidebar:
                     gs, ex = import_workspace_json(up_ws.getvalue())
                     st.session_state["graphs"] = gs
                     st.session_state["experiments"] = ex
+                    st.session_state["graph_wrappers"] = {}
                     if gs:
                         st.session_state["active_graph_id"] = list(gs.keys())[0]
                     st.success("Workspace загружен!")
@@ -837,7 +844,7 @@ with st.sidebar:
     st.markdown("---")
     st.subheader("📈 Визуализация")
     if "plot_height" not in st.session_state:
-        st.session_state["plot_height"] = PLOT_HEIGHT
+        st.session_state["plot_height"] = settings.PLOT_HEIGHT
     if "norm_mode" not in st.session_state:
         st.session_state["norm_mode"] = "none"
 
@@ -863,6 +870,7 @@ with st.sidebar:
         st.session_state["last_exp_id"] = None
         st.session_state["last_upload_hash"] = None
         st.session_state["__decomp_step"] = 0
+        st.session_state["graph_wrappers"] = {}
         st.rerun()
 
 # ============================================================
@@ -888,7 +896,7 @@ def render_top_bar():
         return None
 
     options = list(graphs.keys())
-    options.sort(key=lambda k: graphs[k]["created_at"])
+    options.sort(key=lambda k: graphs[k].created_at)
     if active_gid not in options:
         active_gid = options[0]
         st.session_state["active_graph_id"] = active_gid
@@ -900,7 +908,7 @@ def render_top_bar():
             "Активный граф",
             options,
             index=options.index(active_gid),
-            format_func=lambda x: f"{graphs[x]['name']} ({graphs[x]['source']})",
+            format_func=lambda x: f"{graphs[x].name} ({graphs[x].source})",
             label_visibility="collapsed"
         )
         if selected != active_gid:
@@ -912,20 +920,23 @@ def render_top_bar():
     with col2:
         new_name = st.text_input(
             "Rename",
-            value=entry["name"],
+            value=entry.name,
             label_visibility="collapsed",
             placeholder="Имя графа"
         )
 
     with col3:
         if st.button("💾 Rename", use_container_width=True):
-            st.session_state["graphs"][selected]["name"] = new_name
+            st.session_state["graphs"][selected].name = new_name
             st.rerun()
 
     with col4:
         if st.button("❌ Delete", type="primary", use_container_width=True):
             del st.session_state["graphs"][selected]
-            st.session_state["experiments"] = [e for e in st.session_state["experiments"] if e.get("graph_id") != selected]
+            st.session_state["experiments"] = [
+                e for e in st.session_state["experiments"] if e.graph_id != selected
+            ]
+            st.session_state["graph_wrappers"] = {}
             remaining = list(st.session_state["graphs"].keys())
             st.session_state["active_graph_id"] = remaining[0] if remaining else None
             st.session_state["last_suite_curves"] = None
@@ -965,16 +976,16 @@ if not active_entry:
 # ============================================================
 # 7) BUILD ACTIVE GRAPH
 # ============================================================
-df_edges = active_entry["edges"]
-src_col = active_entry["tags"].get("src_col", df_edges.columns[0])
-dst_col = active_entry["tags"].get("dst_col", df_edges.columns[1])
+df_edges = active_entry.edges_df
+src_col = active_entry.meta_tags.get("src_col", df_edges.columns[0])
+dst_col = active_entry.meta_tags.get("dst_col", df_edges.columns[1])
 
 # Cache key should avoid hashing the full DataFrame repeatedly.
 df_hash = hashlib.md5(pd.util.hash_pandas_object(df_edges).values).hexdigest()
 
 # Fast filtering (cached) and cheap counts. Full NetworkX graph is built lazily after user action.
 df_filtered = _filter_edges_cached(
-    active_entry["id"],
+    active_entry.id,
     df_hash,
     src_col,
     dst_col,
@@ -988,7 +999,7 @@ if "__analysis_mode" not in st.session_state:
 
 with st.sidebar:
     st.markdown("### 📊 Текущий граф")
-    st.caption(f"ID: {active_entry['id']}")
+    st.caption(f"ID: {active_entry.id}")
     c1, c2 = st.columns(2)
     c1.metric("Nodes (быстро)", est_nodes)
     c2.metric("Edges (после фильтров)", est_edges)
@@ -1028,7 +1039,7 @@ with st.sidebar:
     st.markdown("---")
     # Stop-crane: prevent automatic heavy recomputation on every UI change.
     graph_key = (
-        f"{active_entry['id']}|{df_hash}|{src_col}|{dst_col}|"
+        f"{active_entry.id}|{df_hash}|{src_col}|{dst_col}|"
         f"{float(min_conf)}|{float(min_weight)}|{analysis_mode}"
     )
     if st.button("Load graph", type="primary", use_container_width=True, key="load_graph_sidebar"):
@@ -1042,6 +1053,7 @@ metrics_cache_key = f"metrics_{graph_key}"
 G_full = None
 G_view = None
 met = None
+graph_wrapper = None
 
 # Centralized load trigger to ensure heavy work happens only after explicit rerun.
 load_graph = bool(st.session_state.pop("__do_load_graph", False))
@@ -1049,7 +1061,7 @@ load_graph = bool(st.session_state.pop("__do_load_graph", False))
 if load_graph:
     with st.spinner("Строю граф…"):
         G_full = _build_graph_cached(
-            active_entry["id"],
+            active_entry.id,
             df_hash,
             src_col,
             dst_col,
@@ -1058,7 +1070,7 @@ if load_graph:
             "Global (Весь граф)",
         )
         G_view = _build_graph_cached(
-            active_entry["id"],
+            active_entry.id,
             df_hash,
             src_col,
             dst_col,
@@ -1066,9 +1078,10 @@ if load_graph:
             float(min_weight),
             analysis_mode,
         )
+        graph_wrapper = _get_graph_wrapper(graph_key, G_view, active_entry)
     with st.spinner("Считаю метрики…"):
         met = _metrics_cached(
-            active_entry["id"],
+            active_entry.id,
             df_hash,
             src_col,
             dst_col,
@@ -1081,12 +1094,12 @@ if load_graph:
         )
     with st.spinner("Готовлю layout…"):
         # Cache a quick 2D layout explicitly on demand.
-        st.session_state[f"layout2d_{graph_key}"] = compute_layout_cached(G_view)
+        st.session_state[f"layout2d_{graph_key}"] = compute_layout_cached(graph_wrapper)
     st.success("Graph ready")
     st.session_state[metrics_cache_key] = met
 elif metrics_cache_key in st.session_state:
     G_full = _build_graph_cached(
-        active_entry["id"],
+        active_entry.id,
         df_hash,
         src_col,
         dst_col,
@@ -1095,7 +1108,7 @@ elif metrics_cache_key in st.session_state:
         "Global (Весь граф)",
     )
     G_view = _build_graph_cached(
-        active_entry["id"],
+        active_entry.id,
         df_hash,
         src_col,
         dst_col,
@@ -1103,6 +1116,7 @@ elif metrics_cache_key in st.session_state:
         float(min_weight),
         analysis_mode,
     )
+    graph_wrapper = _get_graph_wrapper(graph_key, G_view, active_entry)
     met = st.session_state.get(metrics_cache_key)
 else:
     # При пустом состоянии показываем общий prompt, чтобы не дублировать его в табах.
@@ -1116,11 +1130,11 @@ else:
 curvature_cache_key = (
     f"curvature_{graph_key}|{int(st.session_state.get('__curvature_sample_edges', 80))}|{int(seed_val)}"
 )
-if (G_view is not None) and st.session_state.get("__compute_curvature_now"):
+if (graph_wrapper is not None) and st.session_state.get("__compute_curvature_now"):
     st.session_state["__compute_curvature_now"] = False
     with st.spinner("Считаю Ricci (это может занять время)…"):
         curvature_result = compute_curvature_cached(
-            G_view,
+            graph_wrapper,
             sample_edges=int(st.session_state.get("__curvature_sample_edges", 80)),
             seed=int(seed_val),
         )
@@ -1173,7 +1187,7 @@ def tab_dashboard() -> None:
     if G_view is None:
         return
 
-    st.header(f"Обзор: {active_entry['name']}")
+    st.header(f"Обзор: {active_entry.name}")
     if G_view.number_of_nodes() > 1500:
         st.warning("⚠️ Граф большой. Тяжелые метрики (Ricci, Efficiency) считаются в фоновом режиме.")
 
@@ -1230,10 +1244,10 @@ def tab_energy() -> None:
                 "Сила впрыска (Injection)",
                 0.1,
                 5.0,
-                DEFAULT_INJECTION,
+                settings.DEFAULT_INJECTION,
                 0.1,
             )
-            phys_leak = st.slider("Утечка (Leak)", 0.0, 0.1, DEFAULT_LEAK, 0.001)
+            phys_leak = st.slider("Утечка (Leak)", 0.0, 0.1, settings.DEFAULT_LEAK, 0.001)
             phys_cap = st.selectbox("Емкость узлов", ["strength", "degree"])
             st.session_state["__phys_injection"] = phys_inj
             st.session_state["__phys_leak"] = phys_leak
@@ -1255,7 +1269,7 @@ def tab_energy() -> None:
             "Скорость анимации (мс/кадр)",
             50,
             1000,
-            ANIMATION_DURATION_MS,
+            settings.ANIMATION_DURATION_MS,
             50,
             help="Больше = медленнее. Позволяет вращать граф во время полета.",
         )
@@ -1273,7 +1287,7 @@ def tab_energy() -> None:
             # Layout.
             base_seed = int(seed_val) + int(st.session_state.get("layout_seed_bump", 0))
             pos3d_local = _layout_cached(
-                active_entry["id"],
+                active_entry.id,
                 df_hash,
                 src_col,
                 dst_col,
@@ -1287,12 +1301,12 @@ def tab_energy() -> None:
             src_key = tuple(final_sources) if final_sources else tuple()
 
             # Параметры физики берем из стейта или дефолтов.
-            inj_val = float(st.session_state.get("__phys_injection", DEFAULT_INJECTION))
-            leak_val = float(st.session_state.get("__phys_leak", DEFAULT_LEAK))
+            inj_val = float(st.session_state.get("__phys_injection", settings.DEFAULT_INJECTION))
+            leak_val = float(st.session_state.get("__phys_leak", settings.DEFAULT_LEAK))
             cap_val = str(st.session_state.get("__phys_cap", "strength"))
 
             node_frames, edge_frames = _energy_frames_cached(
-                active_entry["id"],
+                active_entry.id,
                 df_hash,
                 src_col,
                 dst_col,
@@ -1301,7 +1315,7 @@ def tab_energy() -> None:
                 analysis_mode,
                 steps=int(flow_steps),
                 flow_mode=str(flow_mode_ui),
-                damping=DEFAULT_DAMPING,  # Дефолт.
+                damping=settings.DEFAULT_DAMPING,  # Дефолт.
                 sources=src_key,
                 phys_injection=inj_val,
                 phys_leak=leak_val,
@@ -1376,7 +1390,7 @@ def tab_structure() -> None:
         # 1) Получаем pos3d (режимы остаются детерминированными через seed).
         if layout_mode.startswith("Fixed"):
             pos3d = _layout_cached(
-                active_entry["id"],
+                active_entry.id,
                 df_hash,
                 src_col,
                 dst_col,
@@ -1387,7 +1401,7 @@ def tab_structure() -> None:
             )
         else:
             pos3d = _layout_cached(
-                active_entry["id"],
+                active_entry.id,
                 df_hash,
                 src_col,
                 dst_col,
@@ -1426,7 +1440,7 @@ def tab_structure() -> None:
 
             fig_3d = go.Figure(data=[*edge_traces, node_trace])
             fig_3d.update_layout(
-                title=f"3D Structure: {active_entry['name']}",
+                    title=f"3D Structure: {active_entry.name}",
                 template="plotly_dark",
                 showlegend=False,
                 height=820,
@@ -1488,7 +1502,7 @@ def tab_null_models() -> None:
                 df_new = pd.DataFrame(edges, columns=["src", "dst", "weight", "confidence"])
 
                 add_graph(
-                    name=f"{active_entry['name']}{new_name_suffix}",
+                    name=f"{active_entry.name}{new_name_suffix}",
                     df_edges=df_new,
                     source=f"null:{src_tag}",
                     tags={"src_col": "src", "dst_col": "dst"}
@@ -1623,13 +1637,13 @@ def tab_attack_lab() -> None:
                             df_hist.rename(columns={"mix_frac": "removed_frac"})
                         )
 
-                        label = f"{active_entry['name']} | mix:{kind} | seed={seed_run}"
+                            label = f"{active_entry.name} | mix:{kind} | seed={seed_run}"
                         if tag:
                             label += f" [{tag}]"
 
                         save_experiment(
                             name=label,
-                            graph_id=active_entry["id"],
+                                graph_id=active_entry.id,
                             kind=str(kind),
                             params={
                                 "attack_family": "mix",
@@ -1655,13 +1669,13 @@ def tab_attack_lab() -> None:
                         removed_order = _extract_removed_order(aux) or _fallback_removal_order(G_view, kind, int(seed_run))
                         phase_info = classify_phase_transition(df_hist)
 
-                        label = f"{active_entry['name']} | node:{kind} | seed={seed_run}"
+                            label = f"{active_entry.name} | node:{kind} | seed={seed_run}"
                         if tag:
                             label += f" [{tag}]"
 
                         save_experiment(
                             name=label,
-                            graph_id=active_entry["id"],
+                                graph_id=active_entry.id,
                             kind=kind,
                             params={
                                 "attack_family": "node",
@@ -1688,13 +1702,13 @@ def tab_attack_lab() -> None:
                         df_hist = _forward_fill_heavy(df_hist)
                         phase_info = classify_phase_transition(df_hist)
 
-                        label = f"{active_entry['name']} | edge:{kind} | seed={seed_run}"
+                            label = f"{active_entry.name} | edge:{kind} | seed={seed_run}"
                         if tag:
                             label += f" [{tag}]"
 
                         save_experiment(
                             name=label,
-                            graph_id=active_entry["id"],
+                                graph_id=active_entry.id,
                             kind=kind,
                             params={
                                 "attack_family": "edge",
@@ -1715,14 +1729,14 @@ def tab_attack_lab() -> None:
     st.markdown("---")
     st.markdown("## Последний результат (для текущего графа)")
 
-    exps_here = [e for e in st.session_state["experiments"] if e.get("graph_id") == active_entry["id"]]
+    exps_here = [e for e in st.session_state["experiments"] if e.graph_id == active_entry.id]
     if not exps_here:
         st.info("Нет экспериментов. Запусти сверху.")
     else:
-        exps_here.sort(key=lambda x: x["created_at"], reverse=True)
+        exps_here.sort(key=lambda x: x.created_at, reverse=True)
         last_exp = exps_here[0]
-        df_res = _forward_fill_heavy(last_exp["history"].copy())
-        params = last_exp.get("params") or {}
+        df_res = _forward_fill_heavy(last_exp.history.copy())
+        params = last_exp.params or {}
         fam = params.get("attack_family", "node")
         xcol = "mix_frac" if fam == "mix" and "mix_frac" in df_res.columns else "removed_frac"
 
@@ -1853,7 +1867,7 @@ def tab_attack_lab() -> None:
 
             base_seed = int(seed_val) + int(st.session_state.get("layout_seed_bump", 0))
             pos_base = _layout_cached(
-                active_entry["id"],
+                active_entry.id,
                 df_hash,
                 src_col,
                 dst_col,
@@ -2075,7 +2089,7 @@ def tab_attack_lab() -> None:
             "Выбери графы",
             gid_list,
             default=[st.session_state["active_graph_id"]] if st.session_state["active_graph_id"] else [],
-            format_func=lambda gid: f"{graphs[gid]['name']} ({graphs[gid]['source']})",
+            format_func=lambda gid: f"{graphs[gid].name} ({graphs[gid].source})",
             key="mg_gids"
         )
 
@@ -2104,12 +2118,16 @@ def tab_attack_lab() -> None:
                     for gid in sel_gids:
                         entry = graphs[gid]
                         _df = filter_edges(
-                            entry["edges"],
-                            entry["tags"].get("src_col", "src"),
-                            entry["tags"].get("dst_col", "dst"),
+                            entry.edges_df,
+                            entry.meta_tags.get("src_col", "src"),
+                            entry.meta_tags.get("dst_col", "dst"),
                             min_conf, min_weight
                         )
-                        _G = build_graph_from_edges(_df, entry["tags"].get("src_col", "src"), entry["tags"].get("dst_col", "dst"))
+                        _G = build_graph_from_edges(
+                            _df,
+                            entry.meta_tags.get("src_col", "src"),
+                            entry.meta_tags.get("dst_col", "dst"),
+                        )
                         if analysis_mode.startswith("LCC"):
                             _G = lcc_subgraph(_G)
 
@@ -2175,8 +2193,8 @@ def tab_compare() -> None:
         selected_gids = st.multiselect(
             "Выберите графы",
             all_gids,
-            default=[active_entry["id"]] if active_entry["id"] in all_gids else [],
-            format_func=lambda gid: f"{graphs[gid]['name']} ({graphs[gid]['source']})",
+            default=[active_entry.id] if active_entry.id in all_gids else [],
+            format_func=lambda gid: f"{graphs[gid].name} ({graphs[gid].source})",
         )
 
         scalar_metric = st.selectbox(
@@ -2190,17 +2208,21 @@ def tab_compare() -> None:
             for gid in selected_gids:
                 entry = graphs[gid]
                 _df = filter_edges(
-                    entry["edges"],
-                    entry["tags"].get("src_col", "src"),
-                    entry["tags"].get("dst_col", "dst"),
+                    entry.edges_df,
+                    entry.meta_tags.get("src_col", "src"),
+                    entry.meta_tags.get("dst_col", "dst"),
                     min_conf, min_weight
                 )
-                _G = build_graph_from_edges(_df, entry["tags"].get("src_col", "src"), entry["tags"].get("dst_col", "dst"))
+                _G = build_graph_from_edges(
+                    _df,
+                    entry.meta_tags.get("src_col", "src"),
+                    entry.meta_tags.get("dst_col", "dst"),
+                )
                 if analysis_mode.startswith("LCC"):
                     _G = lcc_subgraph(_G)
 
                 _m = calculate_metrics(_G, eff_sources_k=16, seed=42)
-                rows.append({"Name": entry["name"], scalar_metric: _m.get(scalar_metric, np.nan)})
+                rows.append({"Name": entry.name, scalar_metric: _m.get(scalar_metric, np.nan)})
 
             df_cmp = pd.DataFrame(rows)
             fig_bar = px.bar(df_cmp, x="Name", y=scalar_metric, title=f"Comparison: {scalar_metric}", color="Name")
@@ -2216,7 +2238,7 @@ def tab_compare() -> None:
         if not exps:
             st.warning("Нет сохраненных экспериментов.")
         else:
-            exp_opts = {e["id"]: e["name"] for e in exps}
+            exp_opts = {e.id: e.name for e in exps}
             sel_exps = st.multiselect("Выберите эксперименты", list(exp_opts.keys()), format_func=lambda x: exp_opts[x])
 
             y_axis = st.selectbox("Y Axis", ["lcc_frac", "eff_w", "mod", "l2_lcc"], index=0)
@@ -2224,9 +2246,9 @@ def tab_compare() -> None:
                 curves = []
                 x_candidates = []
                 for eid in sel_exps:
-                    e = next(x for x in exps if x["id"] == eid)
-                    df_hist = _forward_fill_heavy(e["history"])
-                    curves.append((e["name"], df_hist))
+                    e = next(x for x in exps if x.id == eid)
+                    df_hist = _forward_fill_heavy(e.history)
+                    curves.append((e.name, df_hist))
                     if "mix_frac" in df_hist.columns:
                         x_candidates.append("mix_frac")
                     else:
