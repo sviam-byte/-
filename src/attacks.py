@@ -231,8 +231,7 @@ def run_edge_attack(
     compute_curvature: bool = False,
     curvature_sample_edges: int = 80,
 ):
-    """
-    Edge-removal attack using weight/confidence, flux, or Ricci-based rankings.
+    """Edge-removal attack using weight/confidence, flux, or Ricci-based rankings.
 
     Returns df_hist and aux, where aux contains removed edge order for downstream UI.
     """
@@ -254,14 +253,6 @@ def run_edge_attack(
     edges = list(H0.edges(data=True))
     kind = str(kind)
 
-    def _safe_float(value, default: float = 0.0) -> float:
-        """Convert to float with finite fallback for edge attributes."""
-        try:
-            v = float(value)
-        except (TypeError, ValueError):
-            return float(default)
-        return v if np.isfinite(v) else float(default)
-
     # --------------------------
     # Cheap rankings by attributes
     # --------------------------
@@ -272,10 +263,9 @@ def run_edge_attack(
         "strong_edges_by_confidence",
     ):
         if "confidence" in kind:
-            key = lambda e: _safe_float(e[2].get("confidence", 1.0), 1.0)
+            key = lambda e: float(e[2].get("confidence", 1.0))
         else:
-            key = lambda e: _safe_float(e[2].get("weight", 1.0), 1.0)
-
+            key = lambda e: float(e[2].get("weight", 1.0))
         edges.sort(key=key, reverse=kind.startswith("strong_"))
 
     else:
@@ -291,63 +281,60 @@ def run_edge_attack(
         else:
             sampled = edge_list
 
-        kappa = {}
-        flux = {}
+        kappa: dict[tuple, float] = {}
+        flux: dict[tuple, float] = {}
 
         # Flux precompute (RW / Evo).
         if kind in ("flux_high_rw", "flux_high_evo", "flux_high_rw_x_neg_ricci"):
             flow_mode = "evo" if kind.endswith("_evo") else "rw"
-            try:
-                _ne, ef = compute_energy_flow(H0, steps=20, flow_mode=flow_mode, damping=1.0)
-                flux = dict(ef)
-            except (ValueError, RuntimeError):
-                flux = {}
+            _ne, ef = compute_energy_flow(H0, steps=20, flow_mode=flow_mode, damping=1.0)
+            flux = dict(ef)
 
         # Curvature on sampled edges.
         if kind.startswith("ricci_") or kind == "flux_high_rw_x_neg_ricci":
             for (u, v) in sampled:
-                try:
-                    val = ollivier_ricci_edge(
-                        H0,
-                        u,
-                        v,
-                        max_support=settings.RICCI_MAX_SUPPORT,
-                        cutoff=settings.RICCI_CUTOFF,
-                    )
-                except (ValueError, RuntimeError):
-                    val = None
-                if val is None or not np.isfinite(val):
+                val = ollivier_ricci_edge(
+                    H0,
+                    u,
+                    v,
+                    max_support=settings.RICCI_MAX_SUPPORT,
+                    cutoff=settings.RICCI_CUTOFF,
+                )
+                if val is None:
                     continue
-                kappa[(u, v)] = float(val)
+                val = float(val)
+                if not np.isfinite(val):
+                    continue
+                kappa[(u, v)] = val
 
-        def _flux_uv(u, v) -> float:
+        def flux_uv(u, v) -> float:
             if (u, v) in flux:
-                return _safe_float(flux[(u, v)], 0.0)
+                return float(flux[(u, v)])
             if (v, u) in flux:
-                return _safe_float(flux[(v, u)], 0.0)
+                return float(flux[(v, u)])
             return 0.0
 
-        def _kappa_uv(u, v) -> float:
+        def kappa_uv(u, v) -> float:
             if (u, v) in kappa:
-                return _safe_float(kappa[(u, v)], 0.0)
+                return float(kappa[(u, v)])
             if (v, u) in kappa:
-                return _safe_float(kappa[(v, u)], 0.0)
+                return float(kappa[(v, u)])
             return 0.0
 
         def score(u, v, d) -> float:
             if kind == "flux_high_rw":
-                return _flux_uv(u, v)
+                return flux_uv(u, v)
             if kind == "flux_high_evo":
-                return _flux_uv(u, v)
+                return flux_uv(u, v)
             if kind == "ricci_most_negative":
-                return -_kappa_uv(u, v)
+                return -kappa_uv(u, v)
             if kind == "ricci_most_positive":
-                return _kappa_uv(u, v)
+                return kappa_uv(u, v)
             if kind == "ricci_abs_max":
-                return abs(_kappa_uv(u, v))
+                return abs(kappa_uv(u, v))
             if kind == "flux_high_rw_x_neg_ricci":
-                return _flux_uv(u, v) * max(0.0, -_kappa_uv(u, v))
-            return _safe_float(d.get("weight", 1.0), 1.0)
+                return flux_uv(u, v) * max(0.0, -kappa_uv(u, v))
+            return float(d.get("weight", 1.0))
 
         edges.sort(key=lambda e: score(e[0], e[1], e[2]), reverse=True)
 
