@@ -39,14 +39,12 @@ from src.config import settings
 from src.metrics import (
     calculate_metrics,
     compute_3d_layout,
-    compute_energy_flow,
     simulate_energy_flow,
     make_3d_traces,
     make_energy_flow_figure_3d,
 )
-from src.core_math import ollivier_ricci_edge
 from src.null_models import make_er_gnm, make_configuration_model, rewire_mix
-from src.attacks import run_attack
+from src.attacks import run_attack, run_edge_attack
 from src.attacks_mix import run_mix_attack
 from src.plotting import fig_metrics_over_steps, fig_compare_attacks
 from src.core_math import classify_phase_transition
@@ -341,199 +339,6 @@ def _compute_metrics_snapshot(
     )
     return m
 
-def run_edge_attack(
-    G: nx.Graph,
-    kind: str,
-    frac: float,
-    steps: int,
-    seed: int,
-    eff_k: int,
-    compute_heavy_every: int = 2,
-):
-    """
-    Edge-removal attack:
-    - kind: weak/strong by weight/confidence OR Ricci/flux-based rankings
-    - returns df_hist, aux
-    aux contains removed_edges_order (list of (u,v)) used for 3D decomposition.
-    """
-    if G.number_of_edges() == 0:
-        df = pd.DataFrame([{"step": 0, "removed_frac": 0.0, "N": G.number_of_nodes(), "E": 0, "lcc_frac": 0.0}])
-        return df, {"removed_edges_order": []}
-
-    H0 = as_simple_undirected(G)
-    edges = list(H0.edges(data=True))
-    kind = str(kind)
-
-    def _sf(x, default: float = 0.0) -> float:
-        """Safe float conversion with finite fallback."""
-        try:
-            v = float(x)
-            if not np.isfinite(v):
-                return float(default)
-            return v
-        except Exception:
-            return float(default)
-
-    # --------------------------
-    # Cheap rankings by attributes
-    # --------------------------
-    if kind in (
-        "weak_edges_by_weight",
-        "weak_edges_by_confidence",
-        "strong_edges_by_weight",
-        "strong_edges_by_confidence",
-    ):
-        if "confidence" in kind:
-            key = lambda e: _sf(e[2].get("confidence", 1.0), 1.0)
-        else:
-            key = lambda e: _sf(e[2].get("weight", 1.0), 1.0)
-
-        reverse = kind.startswith("strong_")
-        edges.sort(key=key, reverse=reverse)
-
-    else:
-        # --------------------------
-        # Expensive rankings: Ricci / Flux
-        # --------------------------
-        rng = np.random.default_rng(int(seed))
-        max_eval = 600  # Cap edge curvature evaluations for speed.
-        edge_list = [(u, v) for (u, v, _d) in edges]
-        if len(edge_list) > max_eval:
-            sample_idx = rng.choice(len(edge_list), size=max_eval, replace=False)
-            sampled = [edge_list[i] for i in sample_idx]
-        else:
-            sampled = edge_list
-
-        kappa = {}
-        flux = {}
-
-        # Flux precompute (RW / Evo).
-        if kind in ("flux_high_rw", "flux_high_evo", "flux_high_rw_x_neg_ricci"):
-            fm = "evo" if kind.endswith("_evo") else "rw"
-            try:
-                _ne, ef = compute_energy_flow(H0, steps=20, flow_mode=fm, damping=1.0)
-                flux = dict(ef)
-            except Exception:
-                flux = {}
-
-        # Curvature on sampled edges.
-        if kind.startswith("ricci_") or kind == "flux_high_rw_x_neg_ricci":
-            for (u, v) in sampled:
-                try:
-                    val = ollivier_ricci_edge(
-                        H0,
-                        u,
-                        v,
-                        max_support=settings.RICCI_MAX_SUPPORT,
-                        cutoff=settings.RICCI_CUTOFF,
-                    )
-                except Exception:
-                    val = None
-                if val is None or not np.isfinite(val):
-                    continue
-                kappa[(u, v)] = float(val)
-
-        def _flux_uv(u, v) -> float:
-            if (u, v) in flux:
-                return _sf(flux[(u, v)], 0.0)
-            if (v, u) in flux:
-                return _sf(flux[(v, u)], 0.0)
-            return 0.0
-
-        def _kappa_uv(u, v) -> float:
-            if (u, v) in kappa:
-                return _sf(kappa[(u, v)], 0.0)
-            if (v, u) in kappa:
-                return _sf(kappa[(v, u)], 0.0)
-            return 0.0
-
-        def score(u, v, d) -> float:
-            if kind == "flux_high_rw":
-                return _flux_uv(u, v)
-            if kind == "flux_high_evo":
-                return _flux_uv(u, v)
-            if kind == "ricci_most_negative":
-                return -_kappa_uv(u, v)
-            if kind == "ricci_most_positive":
-                return _kappa_uv(u, v)
-            if kind == "ricci_abs_max":
-                return abs(_kappa_uv(u, v))
-            if kind == "flux_high_rw_x_neg_ricci":
-                return _flux_uv(u, v) * max(0.0, -_kappa_uv(u, v))
-            return _sf(d.get("weight", 1.0), 1.0)
-
-        edges.sort(key=lambda e: score(e[0], e[1], e[2]), reverse=True)
-
-    total_e = len(edges)
-    remove_total = int(round(float(frac) * total_e))
-    remove_total = max(0, min(remove_total, total_e))
-
-    steps = int(steps)
-    steps = max(1, steps)
-    ks = np.linspace(0, remove_total, steps + 1).round().astype(int).tolist()
-
-    removed_order = [(u, v) for (u, v, _) in edges[:remove_total]]
-
-    H = H0.copy()
-
-    rows = []
-    last_heavy = None
-    for i, k in enumerate(ks):
-        if i == 0:
-            pass
-        else:
-            prev = ks[i - 1]
-            for (u, v) in removed_order[prev:k]:
-                if H.has_edge(u, v):
-                    H.remove_edge(u, v)
-
-        removed_frac = (k / total_e) if total_e else 0.0
-
-        heavy = (i % int(max(1, compute_heavy_every)) == 0) or (i == steps)
-        m = _compute_metrics_snapshot(
-            H,
-            eff_k=eff_k,
-            seed=seed,
-            heavy=heavy,
-            compute_curvature=bool(st.session_state.get("__compute_curvature", False)),
-            curvature_sample_edges=int(st.session_state.get("__curvature_sample_edges", 80)),
-        )
-
-        row = {
-            "step": i,
-            "removed_frac": float(removed_frac),
-            "removed_k": int(k),
-            "N": int(m.get("N", H.number_of_nodes())),
-            "E": int(m.get("E", H.number_of_edges())),
-            "C": int(m.get("C", np.nan)) if "C" in m else np.nan,
-            "lcc_size": int(m.get("lcc_size", np.nan)) if "lcc_size" in m else np.nan,
-            "lcc_frac": float(m.get("lcc_frac", np.nan)) if "lcc_frac" in m else np.nan,
-            "density": float(m.get("density", np.nan)) if "density" in m else np.nan,
-            "avg_degree": float(m.get("avg_degree", np.nan)) if "avg_degree" in m else np.nan,
-            "clustering": float(m.get("clustering", np.nan)) if "clustering" in m else np.nan,
-            "assortativity": float(m.get("assortativity", np.nan)) if "assortativity" in m else np.nan,
-            "eff_w": float(m.get("eff_w", np.nan)) if "eff_w" in m else np.nan,
-        }
-
-        if heavy:
-            row["mod"] = float(m.get("mod", np.nan)) if "mod" in m else np.nan
-            row["l2_lcc"] = float(m.get("l2_lcc", np.nan)) if "l2_lcc" in m else np.nan
-            last_heavy = {"mod": row["mod"], "l2_lcc": row["l2_lcc"]}
-        else:
-            row["mod"] = np.nan
-            row["l2_lcc"] = np.nan
-
-        rows.append(row)
-
-    df_hist = pd.DataFrame(rows)
-    df_hist = _forward_fill_heavy(df_hist)
-    aux = {
-        "removed_edges_order": removed_order,
-        "total_edges": total_e,
-        "kind": kind,
-    }
-    return df_hist, aux
-
 # ============================================================
 # 4) STATE
 # ============================================================
@@ -750,7 +555,9 @@ def run_edge_attack_suite(
             seed_i = int(base_seed) + 1000 * (abs(hash(kind)) % 97) + i
             df_hist, aux = run_edge_attack(
                 G, kind, float(frac), int(steps), int(seed_i), int(eff_k),
-                compute_heavy_every=int(heavy_freq)
+                compute_heavy_every=int(heavy_freq),
+                compute_curvature=bool(st.session_state.get("__compute_curvature", False)),
+                curvature_sample_edges=int(st.session_state.get("__curvature_sample_edges", 80)),
             )
             df_hist = _forward_fill_heavy(df_hist)
             phase_info = classify_phase_transition(df_hist)
@@ -1708,7 +1515,9 @@ def tab_attack_lab() -> None:
                     with st.spinner(f"Edge attack: {kind}"):
                         df_hist, aux = run_edge_attack(
                             G_view, kind, float(frac), int(steps), int(seed_run), int(eff_k),
-                            compute_heavy_every=int(heavy_freq)
+                            compute_heavy_every=int(heavy_freq),
+                            compute_curvature=bool(st.session_state.get("__compute_curvature", False)),
+                            curvature_sample_edges=int(st.session_state.get("__curvature_sample_edges", 80)),
                         )
                         df_hist = _forward_fill_heavy(df_hist)
                         phase_info = classify_phase_transition(df_hist)

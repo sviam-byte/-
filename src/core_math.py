@@ -177,31 +177,24 @@ def network_entropy_rate(G: nx.Graph, base: float = math.e, **_ignored) -> float
         H_rw = - Σ_i π_i Σ_j P_ij log P_ij
     where P_ij = w_ij / strength(i), π_i = strength(i)/Σ strength.
     """
-    H = _normalize_edge_weights(as_simple_undirected(G))
-    if H.number_of_nodes() < 2 or H.number_of_edges() == 0:
+    # Assume G is already simplified and weights are numeric (preprocess validates inputs).
+    if G.number_of_nodes() == 0 or G.number_of_edges() == 0:
         return 0.0
-    # Vectorized computation via sparse adjacency to avoid Python loops.
-    A = nx.adjacency_matrix(H, weight="weight").astype(float).tocsr()
+    A = nx.adjacency_matrix(G, weight="weight").astype(float).tocsr()
     if A.nnz == 0:
         return 0.0
-    d = np.array(A.sum(axis=1)).flatten()
+    d = np.asarray(A.sum(axis=1)).flatten()
     total_s = float(d.sum())
     if total_s <= 0:
         return 0.0
-
-    pi = d / total_s
-    log_base = math.log(base)
 
     # Normalize rows: P_ij = w_ij / d_i (zero-degree rows stay zero).
     inv_d = np.reciprocal(d, out=np.zeros_like(d), where=d > 0)
     P = A.multiply(inv_d[:, None])
 
-    # Row-wise entropy: -sum(p_ij * log(p_ij)) for each i.
-    log_P = P.copy()
-    log_P.data = np.log(P.data + 1e-15) / log_base
-    row_ents = -np.array((P.multiply(log_P)).sum(axis=1)).flatten()
-
-    return float(np.sum(pi * row_ents))
+    # Use SciPy entropy for clarity; convert to dense once for row-wise entropy.
+    row_ents = scipy_entropy(P.toarray(), axis=1, base=base)
+    return float(np.sum((d / total_s) * row_ents))
 
 
 # -----------------------------

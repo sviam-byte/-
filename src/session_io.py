@@ -12,58 +12,34 @@ from .state_models import (
 )
 
 
-def _json_safe(x):
-    """
-    Recursively convert common numpy/pandas types to JSON-serializable python objects.
-    This prevents: TypeError: Object of type ... is not JSON serializable
-    """
-    if x is None or isinstance(x, (str, bool, int, float)):
-        return x
+class GraphDataEncoder(json.JSONEncoder):
+    """Encode numpy/pandas/scalar graph payloads without manual recursion."""
 
-    if isinstance(x, (np.integer,)):
-        return int(x)
-    if isinstance(x, (np.floating,)):
-        return float(x)
-    if isinstance(x, (np.bool_,)):
-        return bool(x)
-
-    if isinstance(x, np.ndarray):
-        return _json_safe(x.tolist())
-
-    try:
-        if pd.isna(x):
-            return None
-    except Exception:
-        pass
-
-    if isinstance(x, (pd.Timestamp, pd.Timedelta)):
-        return str(x)
-
-    if isinstance(x, dict):
-        out = {}
-        for k, v in x.items():
-            if not isinstance(k, str):
-                k = str(k)
-            out[k] = _json_safe(v)
-        return out
-
-    if isinstance(x, (list, tuple)):
-        return [_json_safe(v) for v in x]
-
-    if isinstance(x, set):
-        return [_json_safe(v) for v in sorted(list(x), key=lambda z: str(z))]
-
-    if isinstance(x, pd.Series):
-        return _json_safe(x.to_list())
-    if isinstance(x, pd.DataFrame):
-        return _json_safe(x.to_dict(orient="records"))
-
-    return str(x)
+    def default(self, obj):  # noqa: ANN001 - JSONEncoder API uses untyped args.
+        """Coerce known scientific types into JSON-safe primitives."""
+        if isinstance(obj, (np.integer, np.floating, np.bool_)):
+            return obj.item()
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        if isinstance(obj, (pd.Timestamp, pd.Timedelta)):
+            return obj.isoformat()
+        if isinstance(obj, set):
+            return sorted(list(obj), key=lambda item: str(item))
+        if isinstance(obj, pd.Series):
+            return obj.to_list()
+        if isinstance(obj, pd.DataFrame):
+            return obj.to_dict(orient="records")
+        try:
+            if pd.isna(obj):
+                return None
+        except TypeError:
+            pass
+        return super().default(obj)
 
 
 def _json_dumps_bytes(payload: dict) -> bytes:
-    safe_payload = _json_safe(payload)
-    return json.dumps(safe_payload, ensure_ascii=False, indent=2).encode("utf-8")
+    """Serialize payload with encoder support for numpy/pandas values."""
+    return json.dumps(payload, cls=GraphDataEncoder, ensure_ascii=False, indent=2).encode("utf-8")
 
 
 def _df_to_b64_csv(df: pd.DataFrame) -> str:
