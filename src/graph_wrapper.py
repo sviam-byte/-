@@ -1,35 +1,40 @@
-import time
+"""Lightweight wrapper around NetworkX graphs for Streamlit hashing."""
+
+from __future__ import annotations
+
 import uuid
 
 import networkx as nx
 
 
 class GraphWrapper:
-    """Small wrapper that provides a fast, stable hash for Streamlit caching."""
+    """
+    Обертка вокруг nx.Graph для быстрого хэширования в Streamlit.
 
-    def __init__(self, G: nx.Graph, name: str, source: str):
+    Streamlit кэширует аргументы по хэшу. Вместо перебора всех ребер
+    мы хэшируем только уникальный ID версии, что работает мгновенно.
+    """
+
+    def __init__(self, G: nx.Graph) -> None:
+        """Store graph and generate a unique version identifier."""
         self._G = G
-        self.name = name
-        self.source = source
-        self.id = uuid.uuid4().hex
-        self.last_modified = time.time()
+        # Генерируем уникальный ID при создании.
+        self._version_id = uuid.uuid4().hex
 
     @property
     def G(self) -> nx.Graph:
         """Expose the underlying NetworkX graph."""
         return self._G
 
-    def update_graph(self, new_G: nx.Graph) -> None:
-        """Explicitly update the graph and bump the cache version."""
-        self._G = new_G
-        self.last_modified = time.time()
-        self.id = uuid.uuid4().hex
+    def get_version(self) -> str:
+        """Return the unique version identifier."""
+        return self._version_id
 
+    # Магия для Streamlit: хэш зависит только от строки ID (мгновенно).
     def __hash__(self) -> int:
-        """Hash only a lightweight version marker to keep caching O(1)."""
-        return hash((self.id, self.last_modified))
+        return hash(self._version_id)
 
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, GraphWrapper):
             return False
-        return self.id == other.id
+        return self._version_id == other._version_id

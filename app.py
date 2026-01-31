@@ -18,10 +18,10 @@ st.set_page_config(
 st.title("Graph Lab")
 st.write("UI loaded")
 
-import time
 import uuid
 import hashlib
 import textwrap
+import time
 
 import numpy as np
 import pandas as pd
@@ -31,6 +31,7 @@ import plotly.express as px
 
 from compute import compute_layout as compute_layout_cached
 from compute import compute_curvature as compute_curvature_cached
+from src.graph_wrapper import GraphWrapper
 from src.io_load import load_uploaded_any
 from src.preprocess import coerce_fixed_format, filter_edges
 from src.graph_build import build_graph_from_edges, lcc_subgraph
@@ -62,7 +63,11 @@ from src.session_io import (
     export_experiments_json,
     import_experiments_json,
 )
-from src.state import GraphEntry, ExperimentData
+from src.state_models import (
+    GraphEntry,
+    build_experiment_entry,
+    build_graph_entry,
+)
 from src.utils import as_simple_undirected, get_node_strength
 from src.graph_wrapper import GraphWrapper
 
@@ -77,8 +82,10 @@ def _filter_edges_cached(
     min_weight: float,
 ) -> pd.DataFrame:
     """Cache-friendly wrapper around filter_edges keyed by graph ID + data hash."""
-    entry = st.session_state["graphs"][graph_id]
-    return entry.get_filtered_df(min_conf, min_weight)
+    entry: GraphEntry = st.session_state["graphs"][graph_id]
+    if entry.src_col == src_col and entry.dst_col == dst_col:
+        return entry.get_filtered_edges(min_conf, min_weight)
+    return filter_edges(entry.edges, src_col, dst_col, min_conf, min_weight)
 
 
 @st.cache_resource(show_spinner=False)
@@ -551,41 +558,46 @@ def _init_state():
 
 _init_state()
 
-def _get_graph_wrapper(graph_key: str, G: nx.Graph, entry: GraphEntry) -> GraphWrapper:
-    """Return a stable wrapper for caching operations tied to a graph key."""
-    wrappers = st.session_state["graph_wrappers"]
-    wrapper = wrappers.get(graph_key)
-    if wrapper is None:
-        wrapper = GraphWrapper(G, entry.name, entry.source)
-        wrappers[graph_key] = wrapper
-        return wrapper
-
-    if wrapper.G is not G:
-        wrapper.update_graph(G)
-    return wrapper
-
-def add_graph(name: str, df_edges: pd.DataFrame, source: str, tags=None) -> str:
+def add_graph(
+    name: str,
+    df_edges: pd.DataFrame,
+    source: str,
+    src_col: str | None = None,
+    dst_col: str | None = None,
+) -> str:
+    """Register a new graph in session state and return its ID."""
     gid = new_id("G")
-    st.session_state["graphs"][gid] = GraphEntry(
-        id=gid,
+    src = src_col or df_edges.columns[0]
+    dst = dst_col or df_edges.columns[1]
+    st.session_state["graphs"][gid] = build_graph_entry(
         name=name,
         source=source,
-        edges_df=df_edges.copy(),
-        meta_tags=tags or {},
+        edges=df_edges,
+        src_col=src,
+        dst_col=dst,
+        entry_id=gid,
     )
     st.session_state["active_graph_id"] = gid
     return gid
 
-def save_experiment(name: str, graph_id: str, kind: str, params: dict, df_hist: pd.DataFrame):
+
+def save_experiment(
+    name: str,
+    graph_id: str,
+    kind: str,
+    params: dict,
+    df_hist: pd.DataFrame,
+) -> str:
+    """Persist experiment metadata in session state."""
     eid = new_id("EXP")
     st.session_state["experiments"].append(
-        ExperimentData(
-            id=eid,
+        build_experiment_entry(
             name=name,
             graph_id=graph_id,
             attack_kind=kind,
             params=params,
-            history=df_hist.copy(),
+            history=df_hist,
+            entry_id=eid,
         )
     )
     st.session_state["last_exp_id"] = eid
@@ -826,7 +838,8 @@ with st.sidebar:
                     name=uploaded_file.name,
                     df_edges=df_edges,
                     source="upload",
-                    tags=meta
+                    src_col=meta.get("src_col", df_edges.columns[0]),
+                    dst_col=meta.get("dst_col", df_edges.columns[1]),
                 )
                 st.session_state["last_upload_hash"] = file_hash
                 st.toast(f"Граф {uploaded_file.name} успешно добавлен!", icon="✅")
@@ -888,7 +901,7 @@ def render_top_bar():
                 G_demo = make_er_gnm(200, 800, 42)
                 edges = [[u, v, 1.0, 1.0] for u, v in G_demo.edges()]
                 df_demo = pd.DataFrame(edges, columns=["src", "dst", "weight", "confidence"])
-                add_graph("Demo ER Graph", df_demo, "demo:ER", {"src_col": "src", "dst_col": "dst"})
+                add_graph("Demo ER Graph", df_demo, "demo:ER", src_col="src", dst_col="dst")
                 st.rerun()
         st.markdown('</div>', unsafe_allow_html=True)
         return None
@@ -913,7 +926,7 @@ def render_top_bar():
             st.session_state["active_graph_id"] = selected
             st.rerun()
 
-    entry = graphs[selected]
+    entry: GraphEntry = graphs[selected]
 
     with col2:
         new_name = st.text_input(
@@ -934,7 +947,6 @@ def render_top_bar():
             st.session_state["experiments"] = [
                 e for e in st.session_state["experiments"] if e.graph_id != selected
             ]
-            st.session_state["graph_wrappers"] = {}
             remaining = list(st.session_state["graphs"].keys())
             st.session_state["active_graph_id"] = remaining[0] if remaining else None
             st.session_state["last_suite_curves"] = None
@@ -974,9 +986,9 @@ if not active_entry:
 # ============================================================
 # 7) BUILD ACTIVE GRAPH
 # ============================================================
-df_edges = active_entry.edges_df
-src_col = active_entry.meta_tags.get("src_col", df_edges.columns[0])
-dst_col = active_entry.meta_tags.get("dst_col", df_edges.columns[1])
+df_edges = active_entry.edges
+src_col = active_entry.src_col
+dst_col = active_entry.dst_col
 
 # Cache key should avoid hashing the full DataFrame repeatedly.
 df_hash = hashlib.md5(pd.util.hash_pandas_object(df_edges).values).hexdigest()
@@ -1090,7 +1102,9 @@ if load_graph:
         )
     with st.spinner("Готовлю layout…"):
         # Cache a quick 2D layout explicitly on demand.
-        st.session_state[f"layout2d_{graph_key}"] = compute_layout_cached(graph_wrapper)
+        wrapper = GraphWrapper(G_view)
+        st.session_state[f"graph_wrapper_{graph_key}"] = wrapper
+        st.session_state[f"layout2d_{graph_key}"] = compute_layout_cached(wrapper)
     st.success("Graph ready")
     st.session_state[metrics_cache_key] = met
 elif metrics_cache_key in st.session_state:
@@ -1436,7 +1450,7 @@ def tab_structure() -> None:
 
             fig_3d = go.Figure(data=[*edge_traces, node_trace])
             fig_3d.update_layout(
-                    title=f"3D Structure: {active_entry.name}",
+                title=f"3D Structure: {active_entry.name}",
                 template="plotly_dark",
                 showlegend=False,
                 height=820,
@@ -1501,7 +1515,8 @@ def tab_null_models() -> None:
                     name=f"{active_entry.name}{new_name_suffix}",
                     df_edges=df_new,
                     source=f"null:{src_tag}",
-                    tags={"src_col": "src", "dst_col": "dst"}
+                    src_col="src",
+                    dst_col="dst",
                 )
                 st.success("Граф создан. Переключаюсь на него...")
                 st.rerun()
@@ -1736,7 +1751,7 @@ def tab_attack_lab() -> None:
         fam = params.get("attack_family", "node")
         xcol = "mix_frac" if fam == "mix" and "mix_frac" in df_res.columns else "removed_frac"
 
-        ph = (last_exp.get("params") or {}).get("phase", {})
+        ph = last_exp.params.get("phase", {}) if last_exp.params else {}
         if ph:
             st.caption(
                 f"Phase: {'🔥 Abrupt' if ph.get('is_abrupt') else '🌊 Continuous'}"
@@ -2114,16 +2129,12 @@ def tab_attack_lab() -> None:
                     for gid in sel_gids:
                         entry = graphs[gid]
                         _df = filter_edges(
-                            entry.edges_df,
-                            entry.meta_tags.get("src_col", "src"),
-                            entry.meta_tags.get("dst_col", "dst"),
+                            entry.edges,
+                            entry.src_col,
+                            entry.dst_col,
                             min_conf, min_weight
                         )
-                        _G = build_graph_from_edges(
-                            _df,
-                            entry.meta_tags.get("src_col", "src"),
-                            entry.meta_tags.get("dst_col", "dst"),
-                        )
+                        _G = build_graph_from_edges(_df, entry.src_col, entry.dst_col)
                         if analysis_mode.startswith("LCC"):
                             _G = lcc_subgraph(_G)
 
@@ -2204,16 +2215,12 @@ def tab_compare() -> None:
             for gid in selected_gids:
                 entry = graphs[gid]
                 _df = filter_edges(
-                    entry.edges_df,
-                    entry.meta_tags.get("src_col", "src"),
-                    entry.meta_tags.get("dst_col", "dst"),
+                    entry.edges,
+                    entry.src_col,
+                    entry.dst_col,
                     min_conf, min_weight
                 )
-                _G = build_graph_from_edges(
-                    _df,
-                    entry.meta_tags.get("src_col", "src"),
-                    entry.meta_tags.get("dst_col", "dst"),
-                )
+                _G = build_graph_from_edges(_df, entry.src_col, entry.dst_col)
                 if analysis_mode.startswith("LCC"):
                     _G = lcc_subgraph(_G)
 

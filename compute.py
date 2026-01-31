@@ -1,8 +1,10 @@
 import streamlit as st
+
 import networkx as nx
 import pandas as pd
 
 from src.core_math import fragility_from_curvature, ollivier_ricci_summary
+from src.config import settings
 from src.graph_wrapper import GraphWrapper
 
 
@@ -14,17 +16,17 @@ def build_graph(df: pd.DataFrame) -> nx.Graph:
 
 @st.cache_data(show_spinner=False)
 def compute_layout(wrapper: GraphWrapper) -> dict:
-    """Compute 2D layout. Instant cache check via GraphWrapper hash."""
-    return nx.spring_layout(wrapper.G, seed=42)
+    """Compute and cache a deterministic 2D layout for quick preview plots."""
+    return nx.spring_layout(wrapper.G, seed=settings.DEFAULT_SEED)
 
 
 @st.cache_data(show_spinner=False)
 def compute_curvature(
     wrapper: GraphWrapper,
     sample_edges: int = 150,
-    seed: int = 42,
-    max_support: int = 60,
-    cutoff: float = 8.0,
+    seed: int = settings.DEFAULT_SEED,
+    max_support: int = settings.RICCI_MAX_SUPPORT,
+    cutoff: float = settings.RICCI_CUTOFF,
 ) -> dict:
     """Compute Ricci curvature summary using GraphWrapper for O(1) caching."""
     G = wrapper.G
@@ -38,22 +40,22 @@ def compute_curvature(
             "fragility_kappa": float("nan"),
         }
 
-    try:
-        curv = ollivier_ricci_summary(
-            G,
-            sample_edges=int(sample_edges),
-            seed=int(seed),
-            max_support=int(max_support),
-            cutoff=float(cutoff),
-        )
-        kappa_mean = float(curv.kappa_mean)
-        return {
-            "kappa_mean": kappa_mean,
-            "kappa_median": float(curv.kappa_median),
-            "kappa_frac_negative": float(curv.kappa_frac_negative),
-            "kappa_computed_edges": int(curv.computed_edges),
-            "kappa_skipped_edges": int(curv.skipped_edges),
-            "fragility_kappa": float(fragility_from_curvature(kappa_mean)),
-        }
-    except Exception:
-        return {"kappa_mean": float("nan"), "kappa_computed_edges": 0}
+    curv = ollivier_ricci_summary(
+        G,
+        sample_edges=sample_edges,
+        seed=seed,
+        max_support=max_support,
+        cutoff=cutoff,
+    )
+
+    kappa_mean = curv.kappa_mean
+    fragility_kappa = fragility_from_curvature(kappa_mean)
+
+    return {
+        "kappa_mean": kappa_mean,
+        "kappa_median": curv.kappa_median,
+        "kappa_frac_negative": curv.kappa_frac_negative,
+        "kappa_computed_edges": curv.computed_edges,
+        "kappa_skipped_edges": curv.skipped_edges,
+        "fragility_kappa": fragility_kappa,
+    }
