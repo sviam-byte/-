@@ -1,7 +1,15 @@
-import json
 import base64
-import pandas as pd
+import json
+
 import numpy as np
+import pandas as pd
+
+from .state_models import (
+    ExperimentEntry,
+    GraphEntry,
+    build_experiment_entry,
+    build_graph_entry,
+)
 
 
 def _json_safe(x):
@@ -72,11 +80,21 @@ def _b64_csv_to_df(s: str) -> pd.DataFrame:
 
 def export_workspace_json(graphs: dict, experiments: list) -> bytes:
     """
-    graphs: dict[gid] -> {id,name,source,tags,edges(df),created_at}
-    experiments: list -> {id,name,graph_id,attack_kind,params,history(df),created_at}
+    graphs: dict[gid] -> GraphEntry or legacy dict payloads.
+    experiments: list -> ExperimentEntry or legacy dict payloads.
     """
     g_out = {}
     for gid, g in graphs.items():
+        if isinstance(g, GraphEntry):
+            g_out[gid] = {
+                "id": g.id,
+                "name": g.name,
+                "source": g.source,
+                "tags": {"src_col": g.src_col, "dst_col": g.dst_col},
+                "created_at": g.created_at,
+                "edges_b64": _df_to_b64_csv(g.edges),
+            }
+            continue
         g_out[gid] = {
             "id": g["id"],
             "name": g["name"],
@@ -88,6 +106,19 @@ def export_workspace_json(graphs: dict, experiments: list) -> bytes:
 
     e_out = []
     for e in experiments:
+        if isinstance(e, ExperimentEntry):
+            e_out.append(
+                {
+                    "id": e.id,
+                    "name": e.name,
+                    "graph_id": e.graph_id,
+                    "attack_kind": e.attack_kind,
+                    "params": e.params or {},
+                    "created_at": e.created_at,
+                    "history_b64": _df_to_b64_csv(e.history),
+                }
+            )
+            continue
         e_out.append(
             {
                 "id": e["id"],
@@ -110,31 +141,33 @@ def import_workspace_json(blob: bytes) -> tuple[dict, list]:
     graphs_raw = payload.get("graphs", {})
     exps_raw = payload.get("experiments", [])
 
-    graphs = {}
+    graphs: dict[str, GraphEntry] = {}
     for gid, g in graphs_raw.items():
         edges = _b64_csv_to_df(g["edges_b64"])
-        graphs[gid] = {
-            "id": g.get("id", gid),
-            "name": g.get("name", gid),
-            "source": g.get("source", "import"),
-            "tags": g.get("tags", {}),
-            "created_at": g.get("created_at", 0.0),
-            "edges": edges,
-        }
+        tags = g.get("tags", {}) or {}
+        graphs[gid] = build_graph_entry(
+            name=g.get("name", gid),
+            source=g.get("source", "import"),
+            edges=edges,
+            src_col=tags.get("src_col", edges.columns[0]),
+            dst_col=tags.get("dst_col", edges.columns[1]),
+            entry_id=g.get("id", gid),
+            created_at=g.get("created_at", 0.0),
+        )
 
-    exps = []
+    exps: list[ExperimentEntry] = []
     for e in exps_raw:
         hist = _b64_csv_to_df(e["history_b64"])
         exps.append(
-            {
-                "id": e.get("id"),
-                "name": e.get("name"),
-                "graph_id": e.get("graph_id"),
-                "attack_kind": e.get("attack_kind"),
-                "params": e.get("params", {}),
-                "created_at": e.get("created_at", 0.0),
-                "history": hist,
-            }
+            build_experiment_entry(
+                name=e.get("name"),
+                graph_id=e.get("graph_id"),
+                attack_kind=e.get("attack_kind"),
+                params=e.get("params", {}),
+                history=hist,
+                entry_id=e.get("id"),
+                created_at=e.get("created_at", 0.0),
+            )
         )
 
     return graphs, exps
@@ -144,6 +177,19 @@ def export_experiments_json(experiments: list) -> bytes:
     """Export experiments only (without graph storage) as JSON bytes."""
     e_out = []
     for e in experiments:
+        if isinstance(e, ExperimentEntry):
+            e_out.append(
+                {
+                    "id": e.id,
+                    "name": e.name,
+                    "graph_id": e.graph_id,
+                    "attack_kind": e.attack_kind,
+                    "params": e.params or {},
+                    "created_at": e.created_at,
+                    "history_b64": _df_to_b64_csv(e.history),
+                }
+            )
+            continue
         e_out.append(
             {
                 "id": e["id"],
@@ -163,18 +209,18 @@ def import_experiments_json(blob: bytes) -> list:
     """Import experiments from JSON bytes."""
     payload = json.loads(blob.decode("utf-8"))
     exps_raw = payload.get("experiments", [])
-    exps = []
+    exps: list[ExperimentEntry] = []
     for e in exps_raw:
         hist = _b64_csv_to_df(e["history_b64"])
         exps.append(
-            {
-                "id": e.get("id"),
-                "name": e.get("name"),
-                "graph_id": e.get("graph_id"),
-                "attack_kind": e.get("attack_kind"),
-                "params": e.get("params", {}),
-                "created_at": e.get("created_at", 0.0),
-                "history": hist,
-            }
+            build_experiment_entry(
+                name=e.get("name"),
+                graph_id=e.get("graph_id"),
+                attack_kind=e.get("attack_kind"),
+                params=e.get("params", {}),
+                history=hist,
+                entry_id=e.get("id"),
+                created_at=e.get("created_at", 0.0),
+            )
         )
     return exps

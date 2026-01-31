@@ -15,7 +15,7 @@ import plotly.graph_objects as go
 
 from networkx.algorithms.community import modularity, louvain_communities
 
-from .config import APPROX_EFFICIENCY_K, RICCI_CUTOFF, RICCI_MAX_SUPPORT
+from .config import settings
 from .profiling import timeit
 from .utils import as_simple_undirected
 
@@ -32,11 +32,7 @@ from .core_math import (
 def add_dist_attr(G: nx.Graph) -> nx.Graph:
     H = G.copy()
     for _, _, d in H.edges(data=True):
-        w = d.get("weight", 1.0)
-        try:
-            w = float(w)
-        except Exception:
-            w = 1.0
+        w = float(d.get("weight", 1.0))
         d["dist"] = 1.0 / w if w > 0 else 1e12
     return H
 
@@ -44,19 +40,10 @@ def add_dist_attr(G: nx.Graph) -> nx.Graph:
 def spectral_radius_weighted_adjacency(G: nx.Graph) -> float:
     if G.number_of_nodes() == 0 or G.number_of_edges() == 0:
         return 0.0
-    try:
-        A = nx.adjacency_matrix(G, weight="weight").astype(float)
-        vals = spla.eigs(A, k=1, which="LR", return_eigenvectors=False)
-        lmax = float(np.real(vals[0]))
-        return max(0.0, lmax)
-    except Exception:
-        try:
-            A = nx.to_numpy_array(G, weight="weight", dtype=float)
-            vals = np.linalg.eigvals(A)
-            lmax = float(np.max(np.real(vals)))
-            return max(0.0, lmax)
-        except Exception:
-            return 0.0
+    A = nx.adjacency_matrix(G, weight="weight").astype(float)
+    vals = spla.eigs(A, k=1, which="LR", return_eigenvectors=False)
+    lmax = float(np.real(vals[0]))
+    return max(0.0, lmax)
 
 
 def lambda2_on_lcc(G: nx.Graph) -> float:
@@ -72,45 +59,32 @@ def lambda2_on_lcc(G: nx.Graph) -> float:
         return 0.0
 
     Hs = H.subgraph(lcc).copy()
-    try:
-        L = nx.normalized_laplacian_matrix(Hs, weight="weight").astype(float)
-        # Shift-invert around sigma=0 to target smallest eigenvalues faster.
-        if L.shape[0] <= 2:
-            vals = np.sort(np.real(np.linalg.eigvals(L.toarray())))
-            return float(max(0.0, vals[1])) if vals.size >= 2 else 0.0
-        vals = spla.eigs(L, k=2, which="SM", sigma=0, return_eigenvectors=False)
-        vals = np.sort(np.real(vals))
-        if vals.size >= 2:
-            return float(max(0.0, vals[1]))
-        return 0.0
-    except Exception:
-        try:
-            L = nx.normalized_laplacian_matrix(Hs, weight="weight").toarray().astype(float)
-            vals = np.sort(np.real(np.linalg.eigvals(L)))
-            if vals.size >= 2:
-                return float(max(0.0, vals[1]))
-            return 0.0
-        except Exception:
-            return 0.0
+    L = nx.normalized_laplacian_matrix(Hs, weight="weight").astype(float)
+    # Shift-invert around sigma=0 to target smallest eigenvalues faster.
+    if L.shape[0] <= 2:
+        vals = np.sort(np.real(np.linalg.eigvals(L.toarray())))
+        return float(max(0.0, vals[1])) if vals.size >= 2 else 0.0
+    vals = spla.eigs(L, k=2, which="SM", sigma=0, return_eigenvectors=False)
+    vals = np.sort(np.real(vals))
+    if vals.size >= 2:
+        return float(max(0.0, vals[1]))
+    return 0.0
 
 
 def lcc_fraction(G: nx.Graph, N0: int) -> float:
     """Fraction of original nodes that remain in the largest connected component (undirected view)."""
-    try:
-        N0 = int(N0)
-    except Exception:
-        N0 = 0
     if N0 <= 0 or G.number_of_nodes() == 0:
         return 0.0
     H_u = G.to_undirected(as_view=False) if G.is_directed() else G
-    try:
-        lcc = max(nx.connected_components(H_u), key=len)
-        return float(len(lcc) / float(N0))
-    except Exception:
-        return 0.0
+    lcc = max(nx.connected_components(H_u), key=len)
+    return float(len(lcc) / float(N0))
 
 
-def approx_weighted_efficiency(G: nx.Graph, sources_k: int = APPROX_EFFICIENCY_K, seed: int = 0) -> float:
+def approx_weighted_efficiency(
+    G: nx.Graph,
+    sources_k: int = settings.APPROX_EFFICIENCY_K,
+    seed: int = 0,
+) -> float:
     N = G.number_of_nodes()
     if N < 2 or G.number_of_edges() == 0:
         return 0.0
@@ -140,11 +114,8 @@ def compute_modularity_louvain(G: nx.Graph, seed: int = 0) -> float:
     if G.number_of_nodes() < 2 or G.number_of_edges() == 0:
         return 0.0
     H = G.to_undirected(as_view=False) if G.is_directed() else G
-    try:
-        parts = louvain_communities(H, weight="weight", seed=int(seed))
-        return float(modularity(H, parts, weight="weight"))
-    except Exception:
-        return 0.0
+    parts = louvain_communities(H, weight="weight", seed=seed)
+    return float(modularity(H, parts, weight="weight"))
 
 
 def degree_entropy(G: nx.Graph) -> float:
@@ -222,29 +193,22 @@ def calculate_metrics(
     seed: int,
     compute_curvature: bool = True,
     curvature_sample_edges: int = 150,
-    curvature_max_support: int = RICCI_MAX_SUPPORT,
-    curvature_cutoff: float = RICCI_CUTOFF,
+    curvature_max_support: int = settings.RICCI_MAX_SUPPORT,
+    curvature_cutoff: float = settings.RICCI_CUTOFF,
     **kwargs,
 ) -> GraphMetrics:
     N = G.number_of_nodes()
     E = G.number_of_edges()
-    # Back-compat: older callers used compute_heavy=True/False.
     if "compute_heavy" in kwargs:
-        try:
-            heavy = bool(kwargs.get("compute_heavy"))
-        except Exception:
-            heavy = True
+        heavy = bool(kwargs.get("compute_heavy"))
         if not heavy:
             compute_curvature = False
     if N > 0:
-        try:
-            C = (
-                nx.number_connected_components(G)
-                if not G.is_directed()
-                else nx.number_weakly_connected_components(G)
-            )
-        except Exception:
-            C = 1
+        C = (
+            nx.number_connected_components(G)
+            if not G.is_directed()
+            else nx.number_weakly_connected_components(G)
+        )
     else:
         C = 0
 
@@ -262,13 +226,13 @@ def calculate_metrics(
     l2 = lambda2_on_lcc(G)
     tau = (1.0 / l2) if l2 > 0 else float("inf")
 
-    eff_w = approx_weighted_efficiency(G, sources_k=int(eff_sources_k), seed=int(seed))
-    Q = compute_modularity_louvain(G, seed=int(seed))
+    eff_w = approx_weighted_efficiency(G, sources_k=eff_sources_k, seed=seed)
+    Q = compute_modularity_louvain(G, seed=seed)
 
     ent = degree_entropy(G)
     assort = nx.degree_assortativity_coefficient(G) if N > 2 and E > 0 else 0.0
     clust = nx.average_clustering(H_u) if N > 2 and E > 0 else 0.0
-    diam = approx_diameter_lcc(G, seed=int(seed), samples=16)
+    diam = approx_diameter_lcc(G, seed=seed, samples=16)
 
     beta = int(E - N + C) if N > 0 else 0
 
@@ -305,39 +269,23 @@ def calculate_metrics(
     tau_relax = (1.0 / l2) if (np.isfinite(l2) and l2 > 1e-12) else float("nan")
     epi_thr = (1.0 / lmax) if (np.isfinite(lmax) and lmax > 1e-12) else float("nan")
 
-    # --- robust geometry (safe)
-    try:
-        H_rw = float(network_entropy_rate(G, base=math.e))
-    except Exception:
-        H_rw = float("nan")
-
-    try:
-        H_evo = float(evolutionary_entropy_demetrius(G, base=math.e))
-    except Exception:
-        H_evo = float("nan")
+    H_rw = float(network_entropy_rate(G, base=math.e))
+    H_evo = float(evolutionary_entropy_demetrius(G, base=math.e))
 
     if compute_curvature and G.number_of_edges() > 0:
-        try:
-            curv = ollivier_ricci_summary(
-                G,
-                sample_edges=int(curvature_sample_edges),
-                seed=int(seed),
-                max_support=int(curvature_max_support),
-                cutoff=float(curvature_cutoff),
-            )
-            kappa_mean = float(curv.kappa_mean)
-            kappa_median = float(curv.kappa_median)
-            kappa_frac_negative = float(curv.kappa_frac_negative)
-            kappa_computed_edges = int(curv.computed_edges)
-            kappa_skipped_edges = int(curv.skipped_edges)
-        except Exception:
-            kappa_mean = float("nan")
-            kappa_median = float("nan")
-            kappa_frac_negative = float("nan")
-            kappa_computed_edges = 0
-            kappa_skipped_edges = 0
+        curv = ollivier_ricci_summary(
+            G,
+            sample_edges=curvature_sample_edges,
+            seed=seed,
+            max_support=curvature_max_support,
+            cutoff=curvature_cutoff,
+        )
+        kappa_mean = float(curv.kappa_mean)
+        kappa_median = float(curv.kappa_median)
+        kappa_frac_negative = float(curv.kappa_frac_negative)
+        kappa_computed_edges = int(curv.computed_edges)
+        kappa_skipped_edges = int(curv.skipped_edges)
     else:
-        # Curvature is the main latency driver (LP/EMD per edge). Keep it opt-in.
         kappa_mean = float("nan")
         kappa_median = float("nan")
         kappa_frac_negative = float("nan")
@@ -1054,15 +1002,9 @@ def _build_edge_overlay_traces(
 
     def _edge_colors(count: int) -> List[str]:
         """Return a perceptually distinct colorscale for edge overlays."""
+        from plotly.colors import sample_colorscale
+
         safe_count = int(max(2, count))
-        try:
-            # Lazy import to avoid import-time failures in constrained deployments.
-            from plotly.colors import sample_colorscale
-        except Exception:
-            return [
-                f"rgba(255, 50, 50, {0.3 + 0.7 * i / (safe_count - 1)})"
-                for i in range(safe_count)
-            ]
         return sample_colorscale("Inferno", [i / (safe_count - 1) for i in range(safe_count)])
 
     if vis_contrast is None and vis_clip is None and vis_log is None:
@@ -1185,16 +1127,10 @@ def make_3d_traces(
                 continue
             if overlay_mode == "confidence":
                 raw = d.get("confidence", 1.0)
-                try:
-                    val = float(raw)
-                except Exception:
-                    val = 1.0
+                val = float(raw)
             else:
                 raw = d.get("weight", 1.0)
-                try:
-                    w = float(raw)
-                except Exception:
-                    w = 1.0
+                w = float(raw)
                 w = max(w, 1e-12)
                 val = float(np.log10(w))
             edge_values[(u, v)] = val
@@ -1223,10 +1159,7 @@ def make_3d_traces(
     for a, b in edges:
         if a not in pos3d or b not in pos3d:
             continue
-        try:
-            k = ollivier_ricci_edge(G, a, b, max_support=60, cutoff=8.0)
-        except Exception:
-            k = None
+        k = ollivier_ricci_edge(G, a, b, max_support=60, cutoff=8.0)
         if k is None or not np.isfinite(k):
             continue
         if k < 0:

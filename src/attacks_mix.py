@@ -18,12 +18,11 @@ from .utils import as_simple_undirected
 
 
 def _safe_attr_float(x, default: float = 1.0) -> float:
-    """Привести к float и подставить default для мусора."""
-    try:
-        v = float(x)
-    except (TypeError, ValueError):
-        return float(default)
-    return float(v) if np.isfinite(v) else float(default)
+    """Привести к float и требовать, чтобы значение было конечным."""
+    v = float(x)
+    if not np.isfinite(v):
+        raise ValueError("non-finite edge attribute")
+    return float(v)
 
 def _sample_edge_attrs_from_empirical(
     rng: np.random.Generator,
