@@ -12,8 +12,17 @@ def build_graph_from_edges(df_edges: pd.DataFrame, src_col: str, dst_col: str) -
         create_using=nx.Graph(),
     )
     for _, _, d in G.edges(data=True):
-        w = float(d.get("weight", 1.0))
-        c = float(d.get("confidence", 0.0))
+        w_raw = d.get("weight", 1.0)
+        c_raw = d.get("confidence", 0.0)
+        try:
+            w = float(w_raw)
+        except (TypeError, ValueError):
+            w = 1.0
+        try:
+            c = float(c_raw)
+        except (TypeError, ValueError):
+            c = 0.0
+
         if not np.isfinite(w) or w <= 0:
             raise ValueError(f"edge weight must be finite and >0, got {w!r}")
         if not np.isfinite(c):

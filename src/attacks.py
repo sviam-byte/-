@@ -256,6 +256,14 @@ def run_edge_attack(
     # --------------------------
     # Cheap rankings by attributes
     # --------------------------
+    def _safe_float(value, default: float = 0.0) -> float:
+        """Convert to float with finite fallback for edge attributes."""
+        try:
+            v = float(value)
+        except (TypeError, ValueError):
+            return float(default)
+        return v if np.isfinite(v) else float(default)
+
     if kind in (
         "weak_edges_by_weight",
         "weak_edges_by_confidence",
@@ -265,7 +273,7 @@ def run_edge_attack(
         if "confidence" in kind:
             key = lambda e: float(e[2].get("confidence", 1.0))
         else:
-            key = lambda e: float(e[2].get("weight", 1.0))
+            key = lambda e: _safe_float(e[2].get("weight", 1.0), 1.0)
         edges.sort(key=key, reverse=kind.startswith("strong_"))
 
     else:
@@ -293,16 +301,19 @@ def run_edge_attack(
         # Curvature on sampled edges.
         if kind.startswith("ricci_") or kind == "flux_high_rw_x_neg_ricci":
             for (u, v) in sampled:
-                val = ollivier_ricci_edge(
-                    H0,
-                    u,
-                    v,
-                    max_support=settings.RICCI_MAX_SUPPORT,
-                    cutoff=settings.RICCI_CUTOFF,
-                )
+                try:
+                    val = ollivier_ricci_edge(
+                        H0,
+                        u,
+                        v,
+                        max_support=settings.RICCI_MAX_SUPPORT,
+                        cutoff=settings.RICCI_CUTOFF,
+                    )
+                except (ValueError, RuntimeError):
+                    val = None
                 if val is None:
                     continue
-                val = float(val)
+                val = _safe_float(val, default=float("nan"))
                 if not np.isfinite(val):
                     continue
                 kappa[(u, v)] = val
@@ -334,7 +345,7 @@ def run_edge_attack(
                 return abs(kappa_uv(u, v))
             if kind == "flux_high_rw_x_neg_ricci":
                 return flux_uv(u, v) * max(0.0, -kappa_uv(u, v))
-            return float(d.get("weight", 1.0))
+            return _safe_float(d.get("weight", 1.0), 1.0)
 
         edges.sort(key=lambda e: score(e[0], e[1], e[2]), reverse=True)
 

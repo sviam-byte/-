@@ -17,12 +17,13 @@ from .core_math import (
 from .utils import as_simple_undirected
 
 
-def _attr_float(x) -> float:
-    """Привести к float и требовать, чтобы значение было конечным."""
-    v = float(x)
-    if not np.isfinite(v):
-        raise ValueError(f"non-finite attribute value: {x!r}")
-    return float(v)
+def _safe_attr_float(x, default: float = 1.0) -> float:
+    """Привести к float и вернуть default при нечисловых/бесконечных значениях."""
+    try:
+        v = float(x)
+    except (TypeError, ValueError):
+        return float(default)
+    return float(v) if np.isfinite(v) else float(default)
 
 def _sample_edge_attrs_from_empirical(
     rng: np.random.Generator,
@@ -122,8 +123,8 @@ def run_mix_attack(
     for _, _, d in H0.edges(data=True):
         attrs_pool.append(
             {
-                "weight": _attr_float(d.get("weight", 1.0)),
-                "confidence": _attr_float(d.get("confidence", 1.0)),
+                "weight": _safe_attr_float(d.get("weight", 1.0), 1.0),
+                "confidence": _safe_attr_float(d.get("confidence", 1.0), 1.0),
             }
         )
 

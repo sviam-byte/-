@@ -12,7 +12,18 @@ def load_uploaded_any(file_bytes: bytes, filename: str) -> pd.DataFrame:
     if name.endswith((".xlsx", ".xls")):
         df = pd.read_excel(bio)
     else:
-        df = pd.read_csv(bio, sep=None, engine="python", encoding_errors="replace")
+        # Try utf-8 with replacement; fallback to cp1251 for legacy files.
+        try:
+            df = pd.read_csv(bio, sep=None, engine="python", encoding_errors="replace")
+        except Exception:
+            bio.seek(0)
+            df = pd.read_csv(
+                bio,
+                sep=None,
+                engine="python",
+                encoding="cp1251",
+                encoding_errors="replace",
+            )
 
     df.columns = [str(c).strip() for c in df.columns]
     return df
