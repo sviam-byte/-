@@ -140,13 +140,9 @@ def add_dist_attr(G: nx.Graph) -> nx.Graph:
     """
     H = G.copy()
     for _, _, d in H.edges(data=True):
-        w_raw = d.get("weight", 1.0)
-        try:
-            w = float(w_raw)
-        except (TypeError, ValueError):
-            w = 1.0
+        w = float(d.get("weight", 1.0))
         if not np.isfinite(w) or w <= 0:
-            w = 1e-12
+            raise ValueError(f"edge weight must be finite and >0, got {w!r}")
         d["dist"] = 1.0 / w
     return H
 

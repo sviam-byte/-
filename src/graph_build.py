@@ -24,9 +24,9 @@ def build_graph_from_edges(df_edges: pd.DataFrame, src_col: str, dst_col: str) -
             c = 0.0
 
         if not np.isfinite(w) or w <= 0:
-            w = 1e-12
+            raise ValueError(f"edge weight must be finite and >0, got {w!r}")
         if not np.isfinite(c):
-            c = 0.0
+            raise ValueError(f"edge confidence must be finite, got {c!r}")
 
         d["weight"] = w
         d["confidence"] = c
