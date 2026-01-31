@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import io
 
 import pandas as pd
@@ -10,12 +12,10 @@ def load_uploaded_any(file_bytes: bytes, filename: str) -> pd.DataFrame:
     if name.endswith((".xlsx", ".xls")):
         df = pd.read_excel(bio)
     else:
-        # Let pandas detect the delimiter and encoding via the Python engine.
-        # This keeps parsing robust for semicolon-delimited or mixed-encoding CSVs.
+        # Try utf-8 with replacement; fallback to cp1251 for legacy files.
         try:
             df = pd.read_csv(bio, sep=None, engine="python", encoding_errors="replace")
         except Exception:
-            # Fallback for legacy Cyrillic encodings if auto-detection fails.
             bio.seek(0)
             df = pd.read_csv(
                 bio,

@@ -1,5 +1,6 @@
+from __future__ import annotations
+
 import pandas as pd
-import numpy as np
 
 
 def coerce_fixed_format(df_any: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
@@ -50,40 +51,33 @@ def filter_edges(
     df_edges: pd.DataFrame,
     src_col: str,
     dst_col: str,
-    min_conf: int,
+    min_conf: float,
     min_weight: float,
 ) -> pd.DataFrame:
-    """Filter edges by confidence/weight and coerce numeric columns safely.
+    """Filter edges by confidence/weight and coerce numeric columns.
 
-    Key goals:
-    - Do NOT force node ids (src/dst) to be numeric. Many datasets use strings.
-    - Be tolerant to missing columns: if confidence/weight absent, add defaults.
-    - Coerce confidence/weight to numeric, drop only rows missing src/dst.
+    Узлы оставляем как есть, а атрибуты приводим к числам с отбрасыванием NaN.
     """
     df = df_edges.copy()
 
-    # Ensure required node columns exist
     if src_col not in df.columns or dst_col not in df.columns:
-        raise ValueError(f"Edges table must contain columns '{src_col}' and '{dst_col}'.")
-
-    # Defaults for optional attributes
+        raise ValueError(f"Нет обязательных колонок: {[src_col, dst_col]}")
     if "confidence" not in df.columns:
         df["confidence"] = 100.0
     if "weight" not in df.columns:
         df["weight"] = 1.0
 
-    # Coerce attributes
-    df["confidence"] = pd.to_numeric(df["confidence"], errors="coerce")
-    df["weight"] = pd.to_numeric(df["weight"], errors="coerce")
-
-    # Keep node ids as-is, but drop missing
     df = df.dropna(subset=[src_col, dst_col])
 
-    # Filter thresholds (ignore NaNs by dropping after coercion)
+    df["confidence"] = pd.to_numeric(df["confidence"], errors="coerce")
+    df["weight"] = pd.to_numeric(
+        df["weight"].astype(str).str.replace(",", ".", regex=False),
+        errors="coerce",
+    )
+
     df = df.dropna(subset=["confidence", "weight"])
-    df = df[df["confidence"] >= float(min_conf)]
-    df = df[df["weight"] >= float(min_weight)]
+    df = df[df["confidence"] >= min_conf]
+    df = df[df["weight"] >= min_weight]
     df = df[df["weight"] > 0]
 
     return df
-

@@ -5,9 +5,9 @@ import numpy as np
 
 
 def as_simple_undirected(G: nx.Graph) -> nx.Graph:
-    """
-    Приводит граф к простому неориентированному виду.
-    Для MultiGraph суммирует веса параллельных ребер и сохраняет атрибуты первого ребра.
+    """Привести граф к простому неориентированному виду.
+
+    Предполагается, что weight/confidence уже числовые (это обязан гарантировать preprocess).
     """
     H = G
     if hasattr(H, "is_directed") and H.is_directed():
@@ -18,13 +18,9 @@ def as_simple_undirected(G: nx.Graph) -> nx.Graph:
         simple.add_nodes_from(H.nodes(data=True))
         for u, v, d in H.edges(data=True):
             w = d.get("weight", 1.0)
-            try:
-                w = float(w)
-            except (ValueError, TypeError):
-                w = 1.0
 
             if simple.has_edge(u, v):
-                simple[u][v]["weight"] = float(simple[u][v].get("weight", 0.0)) + w
+                simple[u][v]["weight"] += w
             else:
                 edge_attrs = dict(d)
                 edge_attrs["weight"] = w

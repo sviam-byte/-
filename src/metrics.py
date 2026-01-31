@@ -1,11 +1,8 @@
-# src/metrics.py
+from __future__ import annotations
+
 import math
 import random
-from typing import Dict, List, Optional, Set, Tuple
-
-from typing import Any, Dict, Union
-
-GraphMetrics = Dict[str, Union[int, float, str, Any]]
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -20,6 +17,7 @@ from .profiling import timeit
 from .utils import as_simple_undirected
 
 from .core_math import (
+    add_dist_attr,
     network_entropy_rate,
     evolutionary_entropy_demetrius,
     ollivier_ricci_summary,
@@ -28,13 +26,7 @@ from .core_math import (
     fragility_from_curvature,
 )
 
-
-def add_dist_attr(G: nx.Graph) -> nx.Graph:
-    H = G.copy()
-    for _, _, d in H.edges(data=True):
-        w = float(d.get("weight", 1.0))
-        d["dist"] = 1.0 / w if w > 0 else 1e12
-    return H
+GraphMetrics = dict[str, int | float | str | Any]
 
 
 def spectral_radius_weighted_adjacency(G: nx.Graph) -> float:
