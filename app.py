@@ -73,14 +73,12 @@ from src.graph_wrapper import GraphWrapper
 def _filter_edges_cached(
     graph_id: str,
     df_hash: str,
-    src_col: str,
-    dst_col: str,
     min_conf: float,
     min_weight: float,
 ) -> pd.DataFrame:
     """Cache-friendly wrapper around filter_edges keyed by graph ID + data hash."""
     entry = st.session_state["graphs"][graph_id]
-    return filter_edges(entry.edges_df, src_col, dst_col, min_conf, min_weight)
+    return entry.get_filtered_df(min_conf, min_weight)
 
 
 @st.cache_resource(show_spinner=False)
@@ -94,7 +92,7 @@ def _build_graph_cached(
     analysis_mode: str,
 ) -> nx.Graph:
     """Build NetworkX graph once per filter + analysis mode settings."""
-    df_filtered = _filter_edges_cached(graph_id, df_hash, src_col, dst_col, min_conf, min_weight)
+    df_filtered = _filter_edges_cached(graph_id, df_hash, min_conf, min_weight)
     G = build_graph_from_edges(df_filtered, src_col, dst_col)
     if analysis_mode.startswith("LCC"):
         G = lcc_subgraph(G)
@@ -987,8 +985,6 @@ df_hash = hashlib.md5(pd.util.hash_pandas_object(df_edges).values).hexdigest()
 df_filtered = _filter_edges_cached(
     active_entry.id,
     df_hash,
-    src_col,
-    dst_col,
     float(min_conf),
     float(min_weight),
 )
@@ -1637,13 +1633,13 @@ def tab_attack_lab() -> None:
                             df_hist.rename(columns={"mix_frac": "removed_frac"})
                         )
 
-                            label = f"{active_entry.name} | mix:{kind} | seed={seed_run}"
+                        label = f"{active_entry.name} | mix:{kind} | seed={seed_run}"
                         if tag:
                             label += f" [{tag}]"
 
                         save_experiment(
                             name=label,
-                                graph_id=active_entry.id,
+                            graph_id=active_entry.id,
                             kind=str(kind),
                             params={
                                 "attack_family": "mix",
@@ -1669,13 +1665,13 @@ def tab_attack_lab() -> None:
                         removed_order = _extract_removed_order(aux) or _fallback_removal_order(G_view, kind, int(seed_run))
                         phase_info = classify_phase_transition(df_hist)
 
-                            label = f"{active_entry.name} | node:{kind} | seed={seed_run}"
+                        label = f"{active_entry.name} | node:{kind} | seed={seed_run}"
                         if tag:
                             label += f" [{tag}]"
 
                         save_experiment(
                             name=label,
-                                graph_id=active_entry.id,
+                            graph_id=active_entry.id,
                             kind=kind,
                             params={
                                 "attack_family": "node",
@@ -1702,13 +1698,13 @@ def tab_attack_lab() -> None:
                         df_hist = _forward_fill_heavy(df_hist)
                         phase_info = classify_phase_transition(df_hist)
 
-                            label = f"{active_entry.name} | edge:{kind} | seed={seed_run}"
+                        label = f"{active_entry.name} | edge:{kind} | seed={seed_run}"
                         if tag:
                             label += f" [{tag}]"
 
                         save_experiment(
                             name=label,
-                                graph_id=active_entry.id,
+                            graph_id=active_entry.id,
                             kind=kind,
                             params={
                                 "attack_family": "edge",
