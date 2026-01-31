@@ -15,6 +15,7 @@ import numpy as np
 import pandas as pd
 import networkx as nx
 from joblib import Parallel, delayed
+from scipy.stats import entropy as scipy_entropy
 
 from .utils import as_simple_undirected
 from .profiling import timeit
@@ -22,33 +23,24 @@ from .profiling import timeit
 # -----------------------------
 # Entropy
 # -----------------------------
-def _entropy_from_probs(p: np.ndarray) -> float:
-    """Compute Shannon entropy for a probability vector."""
-    p = np.asarray(p, dtype=float)
-    p = p[np.isfinite(p)]
-    p = p[p > 0]
-    if p.size == 0:
-        return float("nan")
-    return float(-(p * np.log(p)).sum())
-
-
 def entropy_histogram(x, bins="fd") -> float:
-    """Estimate entropy from a histogram (default: Freedman–Diaconis bins)."""
-    x = np.asarray(list(x), dtype=float)
+    """Estimate entropy from a histogram using SciPy (default: Freedman–Diaconis bins)."""
+    x = np.asarray(x, dtype=float)
     x = x[np.isfinite(x)]
     if x.size < 2:
         return float("nan")
     hist, _ = np.histogram(x, bins=bins)
-    s = hist.sum()
-    if s <= 0:
-        return float("nan")
-    p = hist.astype(float) / float(s)
-    return _entropy_from_probs(p)
+    # SciPy handles normalization internally; we keep the raw counts for clarity.
+    return float(scipy_entropy(hist))
 
 
 def entropy_degree(G: nx.Graph) -> float:
     """Entropy of the degree distribution."""
-    return entropy_histogram([d for _, d in G.degree()], bins="fd")
+    degrees = np.fromiter((d for _, d in G.degree()), dtype=float)
+    if degrees.size == 0:
+        return float("nan")
+    _, counts = np.unique(degrees, return_counts=True)
+    return float(scipy_entropy(counts))
 
 
 def entropy_weights(G: nx.Graph) -> float:

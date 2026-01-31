@@ -1,21 +1,28 @@
 """Global configuration and constants."""
 
-# Visualization defaults
-PLOT_HEIGHT = 800
-PLOT_TEMPLATE = "plotly_dark"
-COLOR_PRIMARY = "#ff4b4b"
-ANIMATION_DURATION_MS = 150
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
-# Calculation defaults
-DEFAULT_SEED = 42
-RICCI_CUTOFF = 8.0
-RICCI_MAX_SUPPORT = 60
-APPROX_EFFICIENCY_K = 32
 
-# Phase transition heuristics
-CRITICAL_JUMP_THRESHOLD = 0.35  # Fraction of range to consider "abrupt"
+class Settings(BaseSettings):
+    """Centralized configuration with env overrides (prefix: KODIK_)."""
 
-# UI defaults
-DEFAULT_DAMPING = 0.98
-DEFAULT_INJECTION = 1.0
-DEFAULT_LEAK = 0.005
+    PLOT_HEIGHT: int = 800
+    PLOT_TEMPLATE: str = "plotly_dark"
+    COLOR_PRIMARY: str = "#ff4b4b"
+    ANIMATION_DURATION_MS: int = 150
+
+    DEFAULT_SEED: int = 42
+    RICCI_CUTOFF: float = 8.0
+    RICCI_MAX_SUPPORT: int = 60
+    APPROX_EFFICIENCY_K: int = 32
+
+    CRITICAL_JUMP_THRESHOLD: float = 0.35
+
+    DEFAULT_DAMPING: float = 0.98
+    DEFAULT_INJECTION: float = 1.0
+    DEFAULT_LEAK: float = 0.005
+
+    model_config = SettingsConfigDict(env_prefix="KODIK_")
+
+
+settings = Settings()

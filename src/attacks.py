@@ -159,170 +159,98 @@ def run_attack(
     keep_states: bool = False,
 ):
     """
-    Возвращает:
-      df_hist: stepwise metrics
-      aux: dict with 'removed_nodes' list (critical for UI) and optionally 'states'
+    Unified attack runner handling both adaptive and static strategies.
     """
     attack_kind = str(attack_kind)
-    G_in = as_simple_undirected(G_in)
-    
-    # -----------------------------------------------------
-    # BRANCH 1: Adaptive attacks (weak nodes / low degree)
-    # -----------------------------------------------------
-    if attack_kind in ("low_degree", "weak_strength"):
-        H0 = G_in
-        N0 = H0.number_of_nodes()
-        if N0 < 2:
-            return pd.DataFrame(), {"removed_nodes": [], "states": []}
+    G = as_simple_undirected(G_in).copy()
+    N0 = G.number_of_nodes()
 
-        rng = np.random.default_rng(int(seed))
-        H = H0.copy()
-        states = []
-        removed_nodes = []
-
-        total_remove = int(N0 * float(remove_frac))
-        total_remove = max(0, min(total_remove, N0))
-        steps_count = max(1, int(steps))
-        ks = np.linspace(0, total_remove, steps_count + 1).round().astype(int).tolist()
-
-        history = []
-        removed_total = 0
-
-        for step in range(steps_count):
-            if H.number_of_nodes() < 2:
-                break
-
-            if keep_states:
-                states.append(H.copy())
-
-            heavy = (step % max(1, int(compute_heavy_every)) == 0)
-            if heavy:
-                met = calculate_metrics(
-                    H,
-                    eff_sources_k=int(eff_sources_k),
-                    seed=int(seed),
-                    compute_curvature=False,
-                )
-            else:
-                met = {
-                    "N": H.number_of_nodes(),
-                    "E": H.number_of_edges(),
-                    "C": nx.number_connected_components(H) if H.number_of_nodes() else 0,
-                    "density": nx.density(H) if H.number_of_nodes() > 1 else 0.0,
-                    "avg_degree": (2 * H.number_of_edges() / H.number_of_nodes()) if H.number_of_nodes() else 0.0,
-                    "lcc_size": len(max(nx.connected_components(H), key=len)) if H.number_of_nodes() else 0,
-                    "lcc_frac": 0.0,
-                }
-
-            met["step"] = int(step)
-            met["nodes_left"] = int(H.number_of_nodes())
-            met["removed_total"] = int(removed_total)
-            met["removed_frac"] = float(removed_total / max(1, N0))
-            met["lcc_frac"] = lcc_fraction(H, N0)
-
-            history.append(met)
-
-            next_k = ks[step + 1]
-            delta = int(next_k - removed_total)
-            if delta > 0:
-                picked = _pick_nodes_adaptive(H, attack_kind, delta, rng)
-                if picked is None:
-                    break
-                H.remove_nodes_from(picked)
-                removed_nodes.extend(picked)
-                removed_total += len(picked)
-
-            if removed_total >= total_remove:
-                break
-
-        if keep_states and H.number_of_nodes() > 0:
-            states.append(H.copy())
-
-        df_hist = pd.DataFrame(history)
-        aux = {"removed_nodes": removed_nodes, "mode": "adaptive", "states": states}
-        return df_hist, aux
-
-    # -----------------------------------------------------
-    # BRANCH 2: Standard attacks (centrality / random)
-    # -----------------------------------------------------
-    G_curr = G_in.copy()
-    N0 = G_curr.number_of_nodes()
     if N0 < 2:
-        return pd.DataFrame(), {"removed_nodes": [], "states": []}
+        empty_df = pd.DataFrame([{"step": 0, "removed_frac": 0.0, "lcc_frac": 0.0}])
+        return empty_df, {"removed_nodes": [], "states": []}
 
-    total_remove = int(N0 * float(remove_frac))
-    step_size = max(1, total_remove // int(steps))
-
+    # Setup RNGs
     rng = random.Random(int(seed))
+    np_rng = np.random.default_rng(int(seed))
+
+    # Parameters
+    total_remove = int(N0 * float(remove_frac))
+    total_remove = max(0, min(total_remove, N0))
+    steps = max(1, int(steps))
+
+    # Pre-calculate targets for static strategies (non-adaptive)
+    is_adaptive = attack_kind in ("low_degree", "weak_strength")
+    static_targets = []
+
+    if not is_adaptive:
+        # Request all targets at once for efficiency
+        static_targets = pick_targets_for_attack(
+            G, attack_kind, total_remove, int(seed),
+            rc_frac, rc_min_density, rc_max_frac
+        )
+        # Fallback if strategy didn't return enough nodes
+        if len(static_targets) < total_remove:
+            remaining = list(set(G.nodes()) - set(static_targets))
+            rng.shuffle(remaining)
+            static_targets.extend(remaining[:total_remove - len(static_targets)])
+
+    # Simulation Loop
+    ks = np.linspace(0, total_remove, steps + 1).round().astype(int).tolist()
     history = []
     states = []
-    removed_nodes_all = [] # <--- ВАЖНО: накапливаем удаленные узлы
+    removed_nodes_log = []
 
-    removed_total = 0
-
-    for step in range(int(steps)):
-        if G_curr.number_of_nodes() < 2:
+    for i, target_k in enumerate(ks):
+        if G.number_of_nodes() == 0:
             break
 
+        # 1. Snapshot logic
         if keep_states:
-            states.append(G_curr.copy())
+            states.append(G.copy())
 
-        heavy = (step % max(1, int(compute_heavy_every)) == 0)
+        heavy = (i % max(1, int(compute_heavy_every)) == 0)
 
+        # Calculate metrics
         if heavy:
             met = calculate_metrics(
-                G_curr,
-                eff_sources_k=int(eff_sources_k),
-                seed=int(seed),
-                compute_curvature=False,
+                G, eff_sources_k=int(eff_sources_k), seed=int(seed), compute_curvature=False
             )
         else:
+            # Lightweight metrics only
             met = {
-                "N": G_curr.number_of_nodes(),
-                "E": G_curr.number_of_edges(),
-                "C": nx.number_connected_components(G_curr) if G_curr.number_of_nodes() else 0,
-                "density": nx.density(G_curr) if G_curr.number_of_nodes() > 1 else 0.0,
-                "avg_degree": (2 * G_curr.number_of_edges() / G_curr.number_of_nodes()) if G_curr.number_of_nodes() else 0.0,
-                "lcc_size": len(max(nx.connected_components(G_curr), key=len)) if G_curr.number_of_nodes() else 0,
-                "lcc_frac": 0.0,
+                "N": G.number_of_nodes(),
+                "E": G.number_of_edges(),
+                "density": nx.density(G) if G.number_of_nodes() > 1 else 0.0,
             }
 
-        met["step"] = int(step)
-        met["nodes_left"] = int(G_curr.number_of_nodes())
-        met["removed_total"] = int(removed_total)
-        met["removed_frac"] = float(removed_total / max(1, N0))
-        met["lcc_frac"] = lcc_fraction(G_curr, N0)
-
+        met.update({
+            "step": i,
+            "removed_total": len(removed_nodes_log),
+            "removed_frac": len(removed_nodes_log) / N0,
+            "lcc_frac": lcc_fraction(G, N0),
+        })
         history.append(met)
 
-        # Pick targets
-        targets = pick_targets_for_attack(
-            G_curr,
-            attack_kind=attack_kind,
-            step_size=step_size,
-            seed=int(seed) + step,
-            rc_frac=float(rc_frac),
-            rc_min_density=float(rc_min_density),
-            rc_max_frac=float(rc_max_frac),
-        )
+        # 2. Removal logic (prepare for next step)
+        if i < steps:
+            next_k = ks[i + 1]
+            num_to_remove = next_k - len(removed_nodes_log)
 
-        if not targets:
-            nodes = list(G_curr.nodes())
-            k = min(len(nodes), step_size)
-            targets = rng.sample(nodes, k) if k > 0 else []
+            if num_to_remove > 0:
+                if is_adaptive:
+                    # Recalculate based on current graph state
+                    nodes_to_remove = _pick_nodes_adaptive(G, attack_kind, num_to_remove, np_rng) or []
+                else:
+                    # Take next batch from pre-calculated list
+                    start = len(removed_nodes_log)
+                    nodes_to_remove = static_targets[start : start + num_to_remove]
 
-        G_curr.remove_nodes_from(targets)
-        removed_nodes_all.extend(targets) # <--- ВАЖНО: сохраняем порядок
-        removed_total += len(targets)
+                if nodes_to_remove:
+                    G.remove_nodes_from(nodes_to_remove)
+                    removed_nodes_log.extend(nodes_to_remove)
 
-        if removed_total >= total_remove:
-            break
-
-    if keep_states and G_curr.number_of_nodes() > 0:
-        states.append(G_curr.copy())
-
-    df_hist = pd.DataFrame(history)
-    
-    # Возвращаем словарь с removed_nodes, как того ожидает app.py
-    aux = {"removed_nodes": removed_nodes_all, "mode": "standard", "states": states}
-    return df_hist, aux
+    return pd.DataFrame(history), {
+        "removed_nodes": removed_nodes_log,
+        "mode": attack_kind,
+        "states": states,
+    }

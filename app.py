@@ -34,17 +34,7 @@ from compute import compute_curvature as compute_curvature_cached
 from src.io_load import load_uploaded_any
 from src.preprocess import coerce_fixed_format, filter_edges
 from src.graph_build import build_graph_from_edges, lcc_subgraph
-from src.config import (
-    ANIMATION_DURATION_MS,
-    APPROX_EFFICIENCY_K,
-    DEFAULT_DAMPING,
-    DEFAULT_INJECTION,
-    DEFAULT_LEAK,
-    DEFAULT_SEED,
-    PLOT_HEIGHT,
-    RICCI_CUTOFF,
-    RICCI_MAX_SUPPORT,
-)
+from src.config import settings
 from src.metrics import (
     calculate_metrics,
     compute_3d_layout,
@@ -55,7 +45,7 @@ from src.metrics import (
 )
 from src.core_math import ollivier_ricci_edge
 from src.null_models import make_er_gnm, make_configuration_model, rewire_mix
-from src.attacks import run_attack 
+from src.attacks import run_attack
 from src.attacks_mix import run_mix_attack
 from src.plotting import fig_metrics_over_steps, fig_compare_attacks
 from src.core_math import classify_phase_transition
@@ -72,7 +62,9 @@ from src.session_io import (
     export_experiments_json,
     import_experiments_json,
 )
+from src.state import GraphEntry, ExperimentData
 from src.utils import as_simple_undirected, get_node_strength
+from src.graph_wrapper import GraphWrapper
 
 # -----------------------------
 # Streamlit caching helpers
@@ -88,7 +80,7 @@ def _filter_edges_cached(
 ) -> pd.DataFrame:
     """Cache-friendly wrapper around filter_edges keyed by graph ID + data hash."""
     entry = st.session_state["graphs"][graph_id]
-    return filter_edges(entry["edges"], src_col, dst_col, min_conf, min_weight)
+    return filter_edges(entry.edges_df, src_col, dst_col, min_conf, min_weight)
 
 
 @st.cache_resource(show_spinner=False)
@@ -126,7 +118,7 @@ def _metrics_cached(
     G = _build_graph_cached(graph_id, df_hash, src_col, dst_col, min_conf, min_weight, analysis_mode)
     return calculate_metrics(
         G,
-        eff_sources_k=APPROX_EFFICIENCY_K,
+        eff_sources_k=settings.APPROX_EFFICIENCY_K,
         seed=int(seed),
         compute_curvature=bool(compute_curvature),
         curvature_sample_edges=int(curvature_sample_edges),
@@ -427,8 +419,8 @@ def run_edge_attack(
                         H0,
                         u,
                         v,
-                        max_support=RICCI_MAX_SUPPORT,
-                        cutoff=RICCI_CUTOFF,
+                        max_support=settings.RICCI_MAX_SUPPORT,
+                        cutoff=settings.RICCI_CUTOFF,
                     )
                 except Exception:
                     val = None
@@ -543,16 +535,17 @@ def run_edge_attack(
 def _init_state():
     """Ensure session state is initialized with stable defaults."""
     defaults = {
-        "graphs": {},                 
-        "experiments": [],            
+        "graphs": {},
+        "experiments": [],
         "active_graph_id": None,
-        "seed": DEFAULT_SEED,
+        "seed": settings.DEFAULT_SEED,
         "last_upload_hash": None,
         "layout_seed_bump": 0,
         "last_suite_curves": None,
         "last_multi_curves": None,
         "last_exp_id": None,
         "__decomp_step": 0,
+        "graph_wrappers": {},
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -560,36 +553,49 @@ def _init_state():
 
 _init_state()
 
+def _get_graph_wrapper(graph_key: str, G: nx.Graph, entry: GraphEntry) -> GraphWrapper:
+    """Return a stable wrapper for caching operations tied to a graph key."""
+    wrappers = st.session_state["graph_wrappers"]
+    wrapper = wrappers.get(graph_key)
+    if wrapper is None:
+        wrapper = GraphWrapper(G, entry.name, entry.source)
+        wrappers[graph_key] = wrapper
+        return wrapper
+
+    if wrapper.G is not G:
+        wrapper.update_graph(G)
+    return wrapper
+
 def add_graph(name: str, df_edges: pd.DataFrame, source: str, tags=None) -> str:
     gid = new_id("G")
-    st.session_state["graphs"][gid] = {
-        "id": gid,
-        "name": name,
-        "source": source,
-        "tags": tags or {},
-        "edges": df_edges.copy(),
-        "created_at": time.time(),
-    }
+    st.session_state["graphs"][gid] = GraphEntry(
+        id=gid,
+        name=name,
+        source=source,
+        edges_df=df_edges.copy(),
+        meta_tags=tags or {},
+    )
     st.session_state["active_graph_id"] = gid
     return gid
 
 def save_experiment(name: str, graph_id: str, kind: str, params: dict, df_hist: pd.DataFrame):
     eid = new_id("EXP")
-    st.session_state["experiments"].append({
-        "id": eid,
-        "name": name,
-        "graph_id": graph_id,
-        "attack_kind": kind,
-        "params": params,
-        "history": df_hist.copy(),
-        "created_at": time.time(),
-    })
+    st.session_state["experiments"].append(
+        ExperimentData(
+            id=eid,
+            name=name,
+            graph_id=graph_id,
+            attack_kind=kind,
+            params=params,
+            history=df_hist.copy(),
+        )
+    )
     st.session_state["last_exp_id"] = eid
     return eid
 
 def run_node_attack_suite(
     G: nx.Graph,
-    graph_entry: dict,
+    graph_entry: GraphEntry,
     preset_spec: list,
     frac: float,
     steps: int,
@@ -622,13 +628,13 @@ def run_node_attack_suite(
 
             phase_info = classify_phase_transition(df_hist)
 
-            label = f"{graph_entry['name']} | {kind} | seed={seed_i}"
+            label = f"{graph_entry.name} | {kind} | seed={seed_i}"
             if tag:
                 label += f" [{tag}]"
 
             save_experiment(
                 name=label,
-                graph_id=graph_entry["id"],
+                graph_id=graph_entry.id,
                 kind=kind,
                 params={
                     "attack_family": "node",
@@ -717,7 +723,7 @@ def emulate_node_attack_from_order(
 
 def run_edge_attack_suite(
     G: nx.Graph,
-    graph_entry: dict,
+    graph_entry: GraphEntry,
     preset_spec: list,
     frac: float,
     steps: int,
@@ -739,13 +745,13 @@ def run_edge_attack_suite(
             df_hist = _forward_fill_heavy(df_hist)
             phase_info = classify_phase_transition(df_hist)
 
-            label = f"{graph_entry['name']} | {kind} | seed={seed_i}"
+            label = f"{graph_entry.name} | {kind} | seed={seed_i}"
             if tag:
                 label += f" [{tag}]"
 
             save_experiment(
                 name=label,
-                graph_id=graph_entry["id"],
+                graph_id=graph_entry.id,
                 kind=kind,
                 params={
                     "attack_family": "edge",
@@ -783,6 +789,7 @@ with st.sidebar:
                     gs, ex = import_workspace_json(up_ws.getvalue())
                     st.session_state["graphs"] = gs
                     st.session_state["experiments"] = ex
+                    st.session_state["graph_wrappers"] = {}
                     if gs:
                         st.session_state["active_graph_id"] = list(gs.keys())[0]
                     st.success("Workspace загружен!")
@@ -837,7 +844,7 @@ with st.sidebar:
     st.markdown("---")
     st.subheader("📈 Визуализация")
     if "plot_height" not in st.session_state:
-        st.session_state["plot_height"] = PLOT_HEIGHT
+        st.session_state["plot_height"] = settings.PLOT_HEIGHT
     if "norm_mode" not in st.session_state:
         st.session_state["norm_mode"] = "none"
 
@@ -863,6 +870,7 @@ with st.sidebar:
         st.session_state["last_exp_id"] = None
         st.session_state["last_upload_hash"] = None
         st.session_state["__decomp_step"] = 0
+        st.session_state["graph_wrappers"] = {}
         st.rerun()
 
 # ============================================================
@@ -888,7 +896,7 @@ def render_top_bar():
         return None
 
     options = list(graphs.keys())
-    options.sort(key=lambda k: graphs[k]["created_at"])
+    options.sort(key=lambda k: graphs[k].created_at)
     if active_gid not in options:
         active_gid = options[0]
         st.session_state["active_graph_id"] = active_gid
@@ -900,7 +908,7 @@ def render_top_bar():
             "Активный граф",
             options,
             index=options.index(active_gid),
-            format_func=lambda x: f"{graphs[x]['name']} ({graphs[x]['source']})",
+            format_func=lambda x: f"{graphs[x].name} ({graphs[x].source})",
             label_visibility="collapsed"
         )
         if selected != active_gid:
@@ -912,20 +920,23 @@ def render_top_bar():
     with col2:
         new_name = st.text_input(
             "Rename",
-            value=entry["name"],
+            value=entry.name,
             label_visibility="collapsed",
             placeholder="Имя графа"
         )
 
     with col3:
         if st.button("💾 Rename", use_container_width=True):
-            st.session_state["graphs"][selected]["name"] = new_name
+            st.session_state["graphs"][selected].name = new_name
             st.rerun()
 
     with col4:
         if st.button("❌ Delete", type="primary", use_container_width=True):
             del st.session_state["graphs"][selected]
-            st.session_state["experiments"] = [e for e in st.session_state["experiments"] if e.get("graph_id") != selected]
+            st.session_state["experiments"] = [
+                e for e in st.session_state["experiments"] if e.graph_id != selected
+            ]
+            st.session_state["graph_wrappers"] = {}
             remaining = list(st.session_state["graphs"].keys())
             st.session_state["active_graph_id"] = remaining[0] if remaining else None
             st.session_state["last_suite_curves"] = None
@@ -965,16 +976,16 @@ if not active_entry:
 # ============================================================
 # 7) BUILD ACTIVE GRAPH
 # ============================================================
-df_edges = active_entry["edges"]
-src_col = active_entry["tags"].get("src_col", df_edges.columns[0])
-dst_col = active_entry["tags"].get("dst_col", df_edges.columns[1])
+df_edges = active_entry.edges_df
+src_col = active_entry.meta_tags.get("src_col", df_edges.columns[0])
+dst_col = active_entry.meta_tags.get("dst_col", df_edges.columns[1])
 
 # Cache key should avoid hashing the full DataFrame repeatedly.
 df_hash = hashlib.md5(pd.util.hash_pandas_object(df_edges).values).hexdigest()
 
 # Fast filtering (cached) and cheap counts. Full NetworkX graph is built lazily after user action.
 df_filtered = _filter_edges_cached(
-    active_entry["id"],
+    active_entry.id,
     df_hash,
     src_col,
     dst_col,
@@ -988,7 +999,7 @@ if "__analysis_mode" not in st.session_state:
 
 with st.sidebar:
     st.markdown("### 📊 Текущий граф")
-    st.caption(f"ID: {active_entry['id']}")
+    st.caption(f"ID: {active_entry.id}")
     c1, c2 = st.columns(2)
     c1.metric("Nodes (быстро)", est_nodes)
     c2.metric("Edges (после фильтров)", est_edges)
@@ -1028,7 +1039,7 @@ with st.sidebar:
     st.markdown("---")
     # Stop-crane: prevent automatic heavy recomputation on every UI change.
     graph_key = (
-        f"{active_entry['id']}|{df_hash}|{src_col}|{dst_col}|"
+        f"{active_entry.id}|{df_hash}|{src_col}|{dst_col}|"
         f"{float(min_conf)}|{float(min_weight)}|{analysis_mode}"
     )
     if st.button("Load graph", type="primary", use_container_width=True, key="load_graph_sidebar"):
@@ -1042,6 +1053,7 @@ metrics_cache_key = f"metrics_{graph_key}"
 G_full = None
 G_view = None
 met = None
+graph_wrapper = None
 
 # Centralized load trigger to ensure heavy work happens only after explicit rerun.
 load_graph = bool(st.session_state.pop("__do_load_graph", False))
@@ -1049,7 +1061,7 @@ load_graph = bool(st.session_state.pop("__do_load_graph", False))
 if load_graph:
     with st.spinner("Строю граф…"):
         G_full = _build_graph_cached(
-            active_entry["id"],
+            active_entry.id,
             df_hash,
             src_col,
             dst_col,
@@ -1058,7 +1070,7 @@ if load_graph:
             "Global (Весь граф)",
         )
         G_view = _build_graph_cached(
-            active_entry["id"],
+            active_entry.id,
             df_hash,
             src_col,
             dst_col,
@@ -1066,9 +1078,10 @@ if load_graph:
             float(min_weight),
             analysis_mode,
         )
+        graph_wrapper = _get_graph_wrapper(graph_key, G_view, active_entry)
     with st.spinner("Считаю метрики…"):
         met = _metrics_cached(
-            active_entry["id"],
+            active_entry.id,
             df_hash,
             src_col,
             dst_col,
@@ -1081,12 +1094,12 @@ if load_graph:
         )
     with st.spinner("Готовлю layout…"):
         # Cache a quick 2D layout explicitly on demand.
-        st.session_state[f"layout2d_{graph_key}"] = compute_layout_cached(G_view)
+        st.session_state[f"layout2d_{graph_key}"] = compute_layout_cached(graph_wrapper)
     st.success("Graph ready")
     st.session_state[metrics_cache_key] = met
 elif metrics_cache_key in st.session_state:
     G_full = _build_graph_cached(
-        active_entry["id"],
+        active_entry.id,
         df_hash,
         src_col,
         dst_col,
@@ -1095,7 +1108,7 @@ elif metrics_cache_key in st.session_state:
         "Global (Весь граф)",
     )
     G_view = _build_graph_cached(
-        active_entry["id"],
+        active_entry.id,
         df_hash,
         src_col,
         dst_col,
@@ -1103,6 +1116,7 @@ elif metrics_cache_key in st.session_state:
         float(min_weight),
         analysis_mode,
     )
+    graph_wrapper = _get_graph_wrapper(graph_key, G_view, active_entry)
     met = st.session_state.get(metrics_cache_key)
 else:
     # При пустом состоянии показываем общий prompt, чтобы не дублировать его в табах.
@@ -1116,11 +1130,11 @@ else:
 curvature_cache_key = (
     f"curvature_{graph_key}|{int(st.session_state.get('__curvature_sample_edges', 80))}|{int(seed_val)}"
 )
-if (G_view is not None) and st.session_state.get("__compute_curvature_now"):
+if (graph_wrapper is not None) and st.session_state.get("__compute_curvature_now"):
     st.session_state["__compute_curvature_now"] = False
     with st.spinner("Считаю Ricci (это может занять время)…"):
         curvature_result = compute_curvature_cached(
-            G_view,
+            graph_wrapper,
             sample_edges=int(st.session_state.get("__curvature_sample_edges", 80)),
             seed=int(seed_val),
         )
@@ -1165,196 +1179,669 @@ tab_labels = [
 # Stateful nav prevents tab resets during frequent st.rerun() calls.
 selected_main_tab = st.radio("Разделы", tab_labels, horizontal=True, key="main_tab")
 
-# ------------------------------
-# TAB: DASHBOARD
-# ------------------------------
-if selected_main_tab == tab_labels[0]:
+# ============================================================
+# 8) MAIN TABS DISPATCHER
+# ============================================================
+def tab_dashboard() -> None:
+    """Render the overview dashboard tab."""
     if G_view is None:
-        pass
-    else:
-        st.header(f"Обзор: {active_entry['name']}")
-        if G_view.number_of_nodes() > 1500:
-            st.warning("⚠️ Граф большой. Тяжелые метрики (Ricci, Efficiency) считаются в фоновом режиме.")
+        return
 
-        render_dashboard_metrics(G_view, met)
+    st.header(f"Обзор: {active_entry.name}")
+    if G_view.number_of_nodes() > 1500:
+        st.warning("⚠️ Граф большой. Тяжелые метрики (Ricci, Efficiency) считаются в фоновом режиме.")
 
-        st.markdown("---")
+    render_dashboard_metrics(G_view, met)
 
-        render_dashboard_charts(G_view, _apply_plot_defaults)
+    st.markdown("---")
 
-# ------------------------------
-# TAB: ENERGY & DYNAMICS
-# ------------------------------
-elif selected_main_tab == tab_labels[1]:
+    render_dashboard_charts(G_view, _apply_plot_defaults)
+
+
+def tab_energy() -> None:
+    """Render the Energy & Dynamics tab."""
     st.header("⚡ Динамика и распространение (Energy Flow)")
 
     if G_view is None:
         st.info("Сначала загрузите граф в сайдбаре (Load graph).")
-    else:
-        # --- БЛОК 1: МОДЕЛЬ И ИСТОЧНИКИ ---
-        c1, c2 = st.columns([1, 1])
-        with c1:
-            st.subheader("1. Физика процесса")
-            flow_mode_ui = st.selectbox(
-                "Тип распространения",
-                ["phys", "rw", "evo"],
-                help="Phys: давление/поток (как вода). RW: диффузия (как газ).",
+        return
+
+    # --- БЛОК 1: МОДЕЛЬ И ИСТОЧНИКИ ---
+    c1, c2 = st.columns([1, 1])
+    with c1:
+        st.subheader("1. Физика процесса")
+        flow_mode_ui = st.selectbox(
+            "Тип распространения",
+            ["phys", "rw", "evo"],
+            help="Phys: давление/поток (как вода). RW: диффузия (как газ).",
+        )
+        rw_impulse = st.toggle("Импульсный режим (всплеск)", value=True)
+
+        # Логика источников с пояснением.
+        if "energy_sources" not in st.session_state:
+            st.session_state["energy_sources"] = []
+
+        sources_ui = st.multiselect(
+            "Источники (откуда течет)",
+            options=list(G_view.nodes()),
+            default=st.session_state.get("energy_sources", []),
+            key="src_select",
+        )
+        st.session_state["energy_sources"] = sources_ui
+
+        # Вычисляем и показываем авто-источник, если список пуст.
+        final_sources = list(sources_ui)
+        if not final_sources:
+            # Быстрый расчет "сильного" узла для UI.
+            deg = dict(G_view.degree(weight="weight"))
+            auto_src = max(deg, key=deg.get)
+            st.info(f"🤖 Авто-выбор источника: узел **{auto_src}** (max strength)")
+
+    with c2:
+        st.subheader("2. Параметры потока")
+        if flow_mode_ui == "phys":
+            phys_inj = st.slider(
+                "Сила впрыска (Injection)",
+                0.1,
+                5.0,
+                settings.DEFAULT_INJECTION,
+                0.1,
             )
-            rw_impulse = st.toggle("Импульсный режим (всплеск)", value=True)
+            phys_leak = st.slider("Утечка (Leak)", 0.0, 0.1, settings.DEFAULT_LEAK, 0.001)
+            phys_cap = st.selectbox("Емкость узлов", ["strength", "degree"])
+            st.session_state["__phys_injection"] = phys_inj
+            st.session_state["__phys_leak"] = phys_leak
+            st.session_state["__phys_cap"] = phys_cap
+        else:
+            st.info("Для RW/Evo параметров меньше.")
 
-            # Логика источников с пояснением.
-            if "energy_sources" not in st.session_state:
-                st.session_state["energy_sources"] = []
+        flow_steps = st.slider("Длительность (шаги)", 10, 200, 50)
 
-            sources_ui = st.multiselect(
-                "Источники (откуда течет)",
-                options=list(G_view.nodes()),
-                default=st.session_state.get("energy_sources", []),
-                key="src_select",
+    st.markdown("---")
+
+    # --- БЛОК 2: ВИЗУАЛИЗАЦИЯ ---
+    st.subheader("🎨 Настройка Вида (Сделай красиво)")
+
+    vc1, vc2, vc3 = st.columns(3)
+    with vc1:
+        # Важный слайдер для "замедления".
+        anim_duration = st.slider(
+            "Скорость анимации (мс/кадр)",
+            50,
+            1000,
+            settings.ANIMATION_DURATION_MS,
+            50,
+            help="Больше = медленнее. Позволяет вращать граф во время полета.",
+        )
+        vis_contrast = st.slider("Яркость (Gamma)", 1.0, 10.0, 4.5)
+    with vc2:
+        node_size_energy = st.slider("Размер узлов", 2, 20, 7)
+        vis_clip = st.slider("Срез пиков (Clip)", 0.0, 0.5, 0.05)
+    with vc3:
+        edge_subset_mode = st.selectbox("Отрисовка связей", ["top_flux", "top_weight", "all"], index=0)
+        max_edges_viz = st.slider("Макс. кол-во ребер", 100, 5000, 1500)
+
+    # КНОПКА ЗАПУСКА
+    if st.button("🔥 ЗАПУСТИТЬ СИМУЛЯЦИЮ", type="primary", use_container_width=True):
+        with st.spinner("Моделирование физики..."):
+            # Layout.
+            base_seed = int(seed_val) + int(st.session_state.get("layout_seed_bump", 0))
+            pos3d_local = _layout_cached(
+                active_entry.id,
+                df_hash,
+                src_col,
+                dst_col,
+                float(min_conf),
+                float(min_weight),
+                analysis_mode,
+                base_seed,
             )
-            st.session_state["energy_sources"] = sources_ui
 
-            # Вычисляем и показываем авто-источник, если список пуст.
-            final_sources = list(sources_ui)
-            if not final_sources:
-                # Быстрый расчет "сильного" узла для UI.
-                deg = dict(G_view.degree(weight="weight"))
-                auto_src = max(deg, key=deg.get)
-                st.info(f"🤖 Авто-выбор источника: узел **{auto_src}** (max strength)")
+            # Simulation.
+            src_key = tuple(final_sources) if final_sources else tuple()
 
-        with c2:
-            st.subheader("2. Параметры потока")
-            if flow_mode_ui == "phys":
-                phys_inj = st.slider(
-                    "Сила впрыска (Injection)",
-                    0.1,
-                    5.0,
-                    DEFAULT_INJECTION,
-                    0.1,
-                )
-                phys_leak = st.slider("Утечка (Leak)", 0.0, 0.1, DEFAULT_LEAK, 0.001)
-                phys_cap = st.selectbox("Емкость узлов", ["strength", "degree"])
-                st.session_state["__phys_injection"] = phys_inj
-                st.session_state["__phys_leak"] = phys_leak
-                st.session_state["__phys_cap"] = phys_cap
-            else:
-                st.info("Для RW/Evo параметров меньше.")
+            # Параметры физики берем из стейта или дефолтов.
+            inj_val = float(st.session_state.get("__phys_injection", settings.DEFAULT_INJECTION))
+            leak_val = float(st.session_state.get("__phys_leak", settings.DEFAULT_LEAK))
+            cap_val = str(st.session_state.get("__phys_cap", "strength"))
 
-            flow_steps = st.slider("Длительность (шаги)", 10, 200, 50)
-
-        st.markdown("---")
-
-        # --- БЛОК 2: ВИЗУАЛИЗАЦИЯ ---
-        st.subheader("🎨 Настройка Вида (Сделай красиво)")
-
-        vc1, vc2, vc3 = st.columns(3)
-        with vc1:
-            # Важный слайдер для "замедления".
-            anim_duration = st.slider(
-                "Скорость анимации (мс/кадр)",
-                50,
-                1000,
-                ANIMATION_DURATION_MS,
-                50,
-                help="Больше = медленнее. Позволяет вращать граф во время полета.",
+            node_frames, edge_frames = _energy_frames_cached(
+                active_entry.id,
+                df_hash,
+                src_col,
+                dst_col,
+                float(min_conf),
+                float(min_weight),
+                analysis_mode,
+                steps=int(flow_steps),
+                flow_mode=str(flow_mode_ui),
+                damping=settings.DEFAULT_DAMPING,  # Дефолт.
+                sources=src_key,
+                phys_injection=inj_val,
+                phys_leak=leak_val,
+                phys_cap_mode=cap_val,
+                rw_impulse=bool(rw_impulse),
             )
-            vis_contrast = st.slider("Яркость (Gamma)", 1.0, 10.0, 4.5)
-        with vc2:
-            node_size_energy = st.slider("Размер узлов", 2, 20, 7)
-            vis_clip = st.slider("Срез пиков (Clip)", 0.0, 0.5, 0.05)
-        with vc3:
-            edge_subset_mode = st.selectbox("Отрисовка связей", ["top_flux", "top_weight", "all"], index=0)
-            max_edges_viz = st.slider("Макс. кол-во ребер", 100, 5000, 1500)
 
-        # КНОПКА ЗАПУСКА
-        if st.button("🔥 ЗАПУСТИТЬ СИМУЛЯЦИЮ", type="primary", use_container_width=True):
-            with st.spinner("Моделирование физики..."):
-                # Layout.
-                base_seed = int(seed_val) + int(st.session_state.get("layout_seed_bump", 0))
-                pos3d_local = _layout_cached(
-                    active_entry["id"],
-                    df_hash,
-                    src_col,
-                    dst_col,
-                    float(min_conf),
-                    float(min_weight),
-                    analysis_mode,
-                    base_seed,
-                )
+            # Rendering.
+            fig_flow = make_energy_flow_figure_3d(
+                G_view,
+                pos3d_local,
+                steps=int(flow_steps),
+                node_frames=node_frames,
+                edge_frames=edge_frames,
+                # Передаем параметры визуализации.
+                node_size=int(node_size_energy),
+                vis_contrast=float(vis_contrast),
+                vis_clip=float(vis_clip),
+                # Скорость анимации.
+                anim_duration=int(anim_duration),
+                # Фильтрация.
+                max_edges_viz=int(max_edges_viz),
+                edge_subset_mode=str(edge_subset_mode),
+                # Цвета.
+                vis_log=True,
+            )
 
-                # Simulation.
-                src_key = tuple(final_sources) if final_sources else tuple()
+        st.plotly_chart(fig_flow, use_container_width=True, key="plot_energy_flow")
 
-                # Параметры физики берем из стейта или дефолтов.
-                inj_val = float(st.session_state.get("__phys_injection", DEFAULT_INJECTION))
-                leak_val = float(st.session_state.get("__phys_leak", DEFAULT_LEAK))
-                cap_val = str(st.session_state.get("__phys_cap", "strength"))
 
-                node_frames, edge_frames = _energy_frames_cached(
-                    active_entry["id"],
-                    df_hash,
-                    src_col,
-                    dst_col,
-                    float(min_conf),
-                    float(min_weight),
-                    analysis_mode,
-                    steps=int(flow_steps),
-                    flow_mode=str(flow_mode_ui),
-                    damping=DEFAULT_DAMPING,  # Дефолт.
-                    sources=src_key,
-                    phys_injection=inj_val,
-                    phys_leak=leak_val,
-                    phys_cap_mode=cap_val,
-                    rw_impulse=bool(rw_impulse),
-                )
-
-                # Rendering.
-                fig_flow = make_energy_flow_figure_3d(
-                    G_view,
-                    pos3d_local,
-                    steps=int(flow_steps),
-                    node_frames=node_frames,
-                    edge_frames=edge_frames,
-                    # Передаем параметры визуализации.
-                    node_size=int(node_size_energy),
-                    vis_contrast=float(vis_contrast),
-                    vis_clip=float(vis_clip),
-                    # Скорость анимации.
-                    anim_duration=int(anim_duration),
-                    # Фильтрация.
-                    max_edges_viz=int(max_edges_viz),
-                    edge_subset_mode=str(edge_subset_mode),
-                    # Цвета.
-                    vis_log=True,
-                )
-
-            st.plotly_chart(fig_flow, use_container_width=True, key="plot_energy_flow")
-
-# ------------------------------
-# TAB: STRUCTURE & 3D (static)
-# ------------------------------
-elif selected_main_tab == tab_labels[2]:
+def tab_structure() -> None:
+    """Render the Structure & 3D tab."""
     if G_view is None:
-        pass
+        return
+
+    if G_view.number_of_nodes() > 1500:
+        st.warning("⚠️ Граф большой. Тяжелые метрики (Ricci, Efficiency) считаются в фоновом режиме.")
+    col_vis_ctrl, col_vis_main = st.columns([1, 4])
+
+    with col_vis_ctrl:
+        st.subheader("Настройки 3D")
+        show_labels = st.checkbox("Показать ID узлов", False)
+        node_size = st.slider("Размер узлов", 1, 20, 4)
+        layout_mode = st.selectbox("Layout", ["Fixed (по исходному графу)", "Recompute (по текущему виду)"], index=0)
+
+        st.info("3D-визуализация: фиксированный layout лучше для сравнения по шагам (не прыгает).")
+
+        if st.button("🔄 Обновить layout seed (анти-кэш)"):
+            st.session_state["layout_seed_bump"] = int(st.session_state.get("layout_seed_bump", 0)) + 1
+
+        # Edge overlay options for 3D (coloring by edge-specific metrics).
+        edge_overlay_ui = st.selectbox(
+            "Разметка рёбер",
+            [
+                "Ricci sign (κ<0/κ>0)",
+                "Energy flux (RW)",
+                "Energy flux (Demetrius)",
+                "Weight (log10)",
+                "Confidence",
+                "None",
+            ],
+            index=0,
+        )
+
+    with col_vis_main:
+        if G_view.number_of_nodes() > 2000:
+            st.warning(f"Граф большой ({G_view.number_of_nodes()} узлов). 3D может тормозить.")
+
+        # Seed учитывает "анти-кэш" и делает layout детерминированным между перерисовками.
+        base_seed = int(seed_val) + int(st.session_state.get("layout_seed_bump", 0))
+
+        # 1) Получаем pos3d (режимы остаются детерминированными через seed).
+        if layout_mode.startswith("Fixed"):
+            pos3d = _layout_cached(
+                active_entry.id,
+                df_hash,
+                src_col,
+                dst_col,
+                float(min_conf),
+                float(min_weight),
+                analysis_mode,
+                base_seed,
+            )
+        else:
+            pos3d = _layout_cached(
+                active_entry.id,
+                df_hash,
+                src_col,
+                dst_col,
+                float(min_conf),
+                float(min_weight),
+                analysis_mode,
+                base_seed,
+            )
+
+        edge_overlay = "ricci"
+        flow_mode = "rw"
+        if edge_overlay_ui.startswith("Energy flux"):
+            edge_overlay = "flux"
+            flow_mode = "evo" if "Demetrius" in edge_overlay_ui else "rw"
+        elif edge_overlay_ui.startswith("Weight"):
+            edge_overlay = "weight"
+        elif edge_overlay_ui.startswith("Confidence"):
+            edge_overlay = "confidence"
+        elif edge_overlay_ui.startswith("None"):
+            edge_overlay = "none"
+
+        # 2) Всегда строим трэйсы, чтобы 3D работал и для Fixed, и для Recompute.
+        edge_traces, node_trace = make_3d_traces(
+            G_view,
+            pos3d,
+            show_scale=True,
+            edge_overlay=edge_overlay,
+            flow_mode=flow_mode,
+        )
+
+        # 3) Рисуем внутри col_vis_main, чтобы не ломать сетку.
+        if node_trace is not None:
+            node_trace.marker.size = node_size
+            if show_labels:
+                node_trace.mode = "markers+text"
+
+            fig_3d = go.Figure(data=[*edge_traces, node_trace])
+            fig_3d.update_layout(
+                    title=f"3D Structure: {active_entry.name}",
+                template="plotly_dark",
+                showlegend=False,
+                height=820,
+                margin=dict(l=0, r=0, t=30, b=0),
+                scene=dict(
+                    xaxis=dict(showbackground=False, showticklabels=False, title=""),
+                    yaxis=dict(showbackground=False, showticklabels=False, title=""),
+                    zaxis=dict(showbackground=False, showticklabels=False, title=""),
+                ),
+            )
+            st.plotly_chart(fig_3d, use_container_width=True, key="plot_struct_3d")
+        else:
+            st.write("Граф пуст.")
+
+    st.markdown("---")
+    st.subheader("Матрица смежности (heatmap)")
+    if G_view.number_of_nodes() < 1000 and G_view.number_of_nodes() > 0:
+        adj = nx.adjacency_matrix(as_simple_undirected(G_view), weight="weight").todense()
+        fig_hm = px.imshow(adj, title="Adjacency Heatmap", color_continuous_scale="Viridis")
+        fig_hm.update_layout(template="plotly_dark", height=760, width=760)
+        st.plotly_chart(fig_hm, use_container_width=False, key="plot_adj_heatmap")
     else:
-        if G_view.number_of_nodes() > 1500:
-            st.warning("⚠️ Граф большой. Тяжелые метрики (Ricci, Efficiency) считаются в фоновом режиме.")
-        col_vis_ctrl, col_vis_main = st.columns([1, 4])
+        st.info("Матрица слишком большая для отображения (N >= 1000) или граф пуст.")
 
-        with col_vis_ctrl:
-            st.subheader("Настройки 3D")
-            show_labels = st.checkbox("Показать ID узлов", False)
-            node_size = st.slider("Размер узлов", 1, 20, 4)
-            layout_mode = st.selectbox("Layout", ["Fixed (по исходному графу)", "Recompute (по текущему виду)"], index=0)
 
-            st.info("3D-визуализация: фиксированный layout лучше для сравнения по шагам (не прыгает).")
+def tab_null_models() -> None:
+    """Render the null models tab."""
+    if G_view is None:
+        return
 
-            if st.button("🔄 Обновить layout seed (анти-кэш)"):
-                st.session_state["layout_seed_bump"] = int(st.session_state.get("layout_seed_bump", 0)) + 1
+    st.header("🧪 Нулевые модели и синтетика")
 
-            # Edge overlay options for 3D (coloring by edge-specific metrics).
+    nm_col1, nm_col2 = st.columns([1, 2])
+
+    with nm_col1:
+        st.subheader("Параметры")
+        null_kind = st.selectbox("Тип модели", ["ER G(n,m)", "Configuration Model", "Mix/Rewire (p)"])
+
+        mix_p = 0.0
+        if null_kind == "Mix/Rewire (p)":
+            mix_p = st.slider("p (rewiring probability)", 0.0, 1.0, 0.2, 0.05, help=help_icon("Mix/Rewire"))
+
+        nm_seed = st.number_input("Seed генерации", value=int(seed_val), step=1)
+        new_name_suffix = st.text_input("Суффикс имени", value="_null")
+
+        if st.button("⚙️ Создать и добавить", type="primary"):
+            with st.spinner("Генерация..."):
+                if null_kind == "ER G(n,m)":
+                    G_new = make_er_gnm(G_full.number_of_nodes(), G_full.number_of_edges(), seed=int(nm_seed))
+                    src_tag = "ER"
+                elif null_kind == "Configuration Model":
+                    G_new = make_configuration_model(G_full, seed=int(nm_seed))
+                    src_tag = "CFG"
+                else:
+                    G_new = rewire_mix(G_full, p=float(mix_p), seed=int(nm_seed))
+                    src_tag = f"MIX(p={mix_p})"
+
+                edges = [[u, v, 1.0, 1.0] for u, v in as_simple_undirected(G_new).edges()]
+                df_new = pd.DataFrame(edges, columns=["src", "dst", "weight", "confidence"])
+
+                add_graph(
+                    name=f"{active_entry.name}{new_name_suffix}",
+                    df_edges=df_new,
+                    source=f"null:{src_tag}",
+                    tags={"src_col": "src", "dst_col": "dst"}
+                )
+                st.success("Граф создан. Переключаюсь на него...")
+                st.rerun()
+
+    with nm_col2:
+        st.info("Быстрая проверка против ER-ожиданий (очень грубо):")
+        N = G_view.number_of_nodes()
+        M = G_view.number_of_edges()
+        er_density = 2 * M / (N * (N - 1)) if N > 1 else 0.0
+        er_clustering = er_density
+
+        met_light = met
+        cmp_df = pd.DataFrame({
+            "Metric": ["Avg Degree", "Density", "Clustering (C)", "Modularity (примерно)"],
+            "Active Graph": [met_light.get("avg_degree", np.nan), met_light.get("density", np.nan), met_light.get("clustering", np.nan), met_light.get("mod", np.nan)],
+            "ER Expected": [met_light.get("avg_degree", np.nan), er_density, er_clustering, "~0.0"],
+        })
+        st.dataframe(cmp_df, use_container_width=True)
+
+
+def tab_attack_lab() -> None:
+    """Render the Attack Lab tab."""
+    if G_view is None:
+        return
+
+    st.header("💥 Attack Lab (node + edge + weak)")
+
+    # --------------------------
+    # SINGLE RUN
+    # --------------------------
+    st.subheader("Single run")
+    family = st.radio(
+        "Тип атаки",
+        ["Node (узлы)", "Edge (рёбра: слабые/сильные)", "Mix/Entropy (Hrish)"],
+        horizontal=True,
+    )
+
+    col_setup, _ = st.columns([1, 2])
+
+    with col_setup:
+        with st.container(border=True):
+            st.markdown("### Параметры")
+
+            frac = st.slider("Доля удаления", 0.05, 0.95, 0.5, 0.05)
+            steps = st.slider("Шаги", 5, 150, 30)
+            seed_run = st.number_input("Seed", value=int(seed_val), step=1)
+
+            with st.expander("Дополнительно"):
+                eff_k = st.slider("Efficiency samples (k)", 8, 256, 32)
+                heavy_freq = st.slider("Тяжёлые метрики каждые N шагов", 1, 10, 2)
+                tag = st.text_input("Тег", "")
+
+            if family.startswith("Node"):
+                attack_ui = st.selectbox(
+                    "Стратегия (узлы)",
+                    [
+                        "random",
+                        "degree (Hubs)",
+                        "betweenness (Bridges)",
+                        "kcore (Deep Core)",
+                        "richclub_top (Top Strength)",
+                        "low_degree (Weak nodes)",
+                        "weak_strength (Weak strength)",
+                    ],
+                )
+                kind_map = {
+                    "random": "random",
+                    "degree (Hubs)": "degree",
+                    "betweenness (Bridges)": "betweenness",
+                    "kcore (Deep Core)": "kcore",
+                    "richclub_top (Top Strength)": "richclub_top",
+                    "low_degree (Weak nodes)": "low_degree",
+                    "weak_strength (Weak strength)": "weak_strength",
+                }
+                kind = kind_map.get(attack_ui, "random")
+
+            elif family.startswith("Edge"):
+                attack_ui = st.selectbox(
+                    "Стратегия (рёбра)",
+                    [
+                        "weak_edges_by_weight",
+                        "weak_edges_by_confidence",
+                        "strong_edges_by_weight",
+                        "strong_edges_by_confidence",
+                        "ricci_most_negative (κ min)",
+                        "ricci_most_positive (κ max)",
+                        "ricci_abs_max (|κ| max)",
+                        "flux_high_rw",
+                        "flux_high_evo",
+                        "flux_high_rw_x_neg_ricci",
+                    ],
+                    help=help_icon("Weak edges")
+                )
+                kind = str(attack_ui).split(" ")[0]
+
+            else:
+                kind = st.selectbox(
+                    "Режим Hrish",
+                    [
+                        "hrish_mix",
+                        "mix_degree_preserving",
+                        "mix_weightconf_preserving",
+                    ],
+                    help="hrish_mix = rewire (degree-preserving) + replace из нулевой модели.",
+                )
+                replace_from = st.selectbox("Replace source", ["ER", "CFG"], index=0)
+                alpha_rewire = st.slider("alpha (rewire)", 0.0, 1.0, 0.6, 0.05)
+                beta_replace = st.slider("beta (replace)", 0.0, 1.0, 0.4, 0.05)
+                swaps_per_edge = st.slider("swaps_per_edge", 0.0, 3.0, 0.5, 0.1)
+                st.caption("Ось X здесь: mix_frac (0..1), а не removed_frac.")
+
+            if st.button("🚀 RUN", type="primary", use_container_width=True):
+                if family.startswith("Mix/Entropy"):
+                    with st.spinner(f"Mix attack: {kind}"):
+                        df_hist, aux = run_mix_attack(
+                            G_view,
+                            kind=str(kind),
+                            steps=int(steps),
+                            seed=int(seed_run),
+                            eff_sources_k=int(eff_k),
+                            heavy_every=int(heavy_freq),
+                            alpha_rewire=float(alpha_rewire),
+                            beta_replace=float(beta_replace),
+                            swaps_per_edge=float(swaps_per_edge),
+                            replace_from=str(replace_from),
+                        )
+                        df_hist = _forward_fill_heavy(df_hist)
+                        phase_info = classify_phase_transition(
+                            df_hist.rename(columns={"mix_frac": "removed_frac"})
+                        )
+
+                            label = f"{active_entry.name} | mix:{kind} | seed={seed_run}"
+                        if tag:
+                            label += f" [{tag}]"
+
+                        save_experiment(
+                            name=label,
+                                graph_id=active_entry.id,
+                            kind=str(kind),
+                            params={
+                                "attack_family": "mix",
+                                "steps": int(steps),
+                                "seed": int(seed_run),
+                                "phase": phase_info,
+                                "eff_k": int(eff_k),
+                                "heavy_every": int(heavy_freq),
+                                **aux,
+                            },
+                            df_hist=df_hist,
+                        )
+                    st.success("Готово.")
+                    st.rerun()
+
+                if family.startswith("Node"):
+                    with st.spinner(f"Node attack: {kind}"):
+                        df_hist, aux = run_attack(
+                            G_view, kind, float(frac), int(steps), int(seed_run), int(eff_k),
+                            rc_frac=0.1, compute_heavy_every=int(heavy_freq)
+                        )
+                        df_hist = _forward_fill_heavy(df_hist)
+                        removed_order = _extract_removed_order(aux) or _fallback_removal_order(G_view, kind, int(seed_run))
+                        phase_info = classify_phase_transition(df_hist)
+
+                            label = f"{active_entry.name} | node:{kind} | seed={seed_run}"
+                        if tag:
+                            label += f" [{tag}]"
+
+                        save_experiment(
+                            name=label,
+                                graph_id=active_entry.id,
+                            kind=kind,
+                            params={
+                                "attack_family": "node",
+                                "frac": float(frac),
+                                "steps": int(steps),
+                                "seed": int(seed_run),
+                                "phase": phase_info,
+                                "compute_heavy_every": int(heavy_freq),
+                                "eff_k": int(eff_k),
+                                "removed_order": removed_order,
+                                "mode": "src_run_attack_or_fallback",
+                            },
+                            df_hist=df_hist
+                        )
+                    st.success("Готово.")
+                    st.rerun()
+
+                else:
+                    with st.spinner(f"Edge attack: {kind}"):
+                        df_hist, aux = run_edge_attack(
+                            G_view, kind, float(frac), int(steps), int(seed_run), int(eff_k),
+                            compute_heavy_every=int(heavy_freq)
+                        )
+                        df_hist = _forward_fill_heavy(df_hist)
+                        phase_info = classify_phase_transition(df_hist)
+
+                            label = f"{active_entry.name} | edge:{kind} | seed={seed_run}"
+                        if tag:
+                            label += f" [{tag}]"
+
+                        save_experiment(
+                            name=label,
+                                graph_id=active_entry.id,
+                            kind=kind,
+                            params={
+                                "attack_family": "edge",
+                                "frac": float(frac),
+                                "steps": int(steps),
+                                "seed": int(seed_run),
+                                "phase": phase_info,
+                                "compute_heavy_every": int(heavy_freq),
+                                "eff_k": int(eff_k),
+                                "removed_edges_order": aux.get("removed_edges_order", []),
+                                "total_edges": aux.get("total_edges", None),
+                            },
+                            df_hist=df_hist
+                        )
+                    st.success("Готово.")
+                    st.rerun()
+
+    st.markdown("---")
+    st.markdown("## Последний результат (для текущего графа)")
+
+    exps_here = [e for e in st.session_state["experiments"] if e.graph_id == active_entry.id]
+    if not exps_here:
+        st.info("Нет экспериментов. Запусти сверху.")
+    else:
+        exps_here.sort(key=lambda x: x.created_at, reverse=True)
+        last_exp = exps_here[0]
+        df_res = _forward_fill_heavy(last_exp.history.copy())
+        params = last_exp.params or {}
+        fam = params.get("attack_family", "node")
+        xcol = "mix_frac" if fam == "mix" and "mix_frac" in df_res.columns else "removed_frac"
+
+        ph = (last_exp.get("params") or {}).get("phase", {})
+        if ph:
+            st.caption(
+                f"Phase: {'🔥 Abrupt' if ph.get('is_abrupt') else '🌊 Continuous'}"
+                f" | critical_x ≈ {float(ph.get('critical_x', 0.0)):.3f}"
+            )
+
+        attack_tabs = ["📉 Curves", "🌀 Phase views", "🧊 3D step-by-step"]
+        # Stateful selector avoids tab resets when animation uses st.rerun().
+        selected_attack_tab = st.radio(
+            "Просмотр результатов",
+            attack_tabs,
+            horizontal=True,
+            key="attack_results_tab",
+        )
+
+        if selected_attack_tab == attack_tabs[0]:
+            with st.expander("❔ Что означают метрики на графиках", expanded=False):
+                st.markdown(
+                    "- **lcc_frac**: доля узлов в гигантской компоненте (порядковый параметр перколяции)\n"
+                    "- **eff_w**: глобальная эффективность (в среднем насколько короткие пути; выше = сеть “связнее”)\n"
+                    "- **l2_lcc**: λ₂ (алгебраическая связность) для LCC; близко к 0 = “на грани распада”\n"
+                    "- **mod**: модульность сообществ; рост часто означает фрагментацию на кластеры\n"
+                    "- **H_***: энтропии распределений (рост “случайности” структуры)\n"
+                )
+            fig = fig_metrics_over_steps(
+                df_res,
+                title="Метрики по шагам",
+                normalize_mode=st.session_state["norm_mode"],
+                height=st.session_state["plot_height"],
+            )
+            fig.update_layout(template="plotly_dark")
+            fig.update_traces(mode="lines+markers")
+            fig.update_traces(line_width=3)
+            fig = _apply_plot_defaults(fig, height=st.session_state["plot_height"])
+            st.plotly_chart(fig, use_container_width=True, key="plot_attack_metrics")
+
+            st.markdown("#### AUC (robustness) по выбранной метрике")
+            y_axis = st.selectbox(
+                "Метрика для AUC",
+                [c for c in ["lcc_frac", "eff_w", "l2_lcc", "mod", "H_deg", "H_w", "H_conf", "H_tri"] if c in df_res.columns],
+                index=0,
+                key="auc_y_single",
+            )
+            st.caption(METRIC_HELP.get(y_axis, ""))
+
+            if y_axis in df_res.columns and xcol in df_res.columns:
+                xs = pd.to_numeric(df_res[xcol], errors="coerce")
+                ys = pd.to_numeric(df_res[y_axis], errors="coerce")
+                mask = xs.notna() & ys.notna()
+                if mask.sum() >= 2:
+                    auc_val = float(AUC_TRAP(ys[mask].to_numpy(), xs[mask].to_numpy()))
+                    st.metric("AUC", f"{auc_val:.6f}")
+                else:
+                    st.info("Недостаточно точек для AUC.")
+
+            with st.expander("❓ Что на этих графиках", expanded=False):
+                txt = """
+                Ось X:
+                  - removed_frac: доля удалённых узлов/рёбер (атаки).
+                  - mix_frac: уровень энтропизации (Hrish mix), 0..1.
+
+                Ось Y:
+                  - lcc_frac: доля LCC (перколяция).
+                  - eff_w: эффективность (качество глобальной связности путей).
+                  - l2_lcc: λ₂ (спектральная связность LCC).
+                  - mod: модульность (структура сообществ).
+                  - H_*: энтропии распределений (рост “случайности”).
+                """
+                st.text(textwrap.dedent(txt).strip())
+
+        elif selected_attack_tab == attack_tabs[1]:
+            if xcol in df_res.columns and "lcc_frac" in df_res.columns:
+                fig_lcc = px.line(df_res, x=xcol, y="lcc_frac", title="Order parameter: LCC fraction vs removed fraction")
+                fig_lcc.update_layout(template="plotly_dark")
+                fig_lcc = _apply_plot_defaults(fig_lcc, height=780, y_range=_auto_y_range(df_res["lcc_frac"]))
+                st.plotly_chart(fig_lcc, use_container_width=True, key="plot_phase_lcc")
+
+            if xcol in df_res.columns and "lcc_frac" in df_res.columns:
+                dfp = df_res.sort_values(xcol).copy()
+                dx = pd.to_numeric(dfp[xcol], errors="coerce").diff()
+                dy = pd.to_numeric(dfp["lcc_frac"], errors="coerce").diff()
+                dfp["suscep"] = (dy / dx).replace([np.inf, -np.inf], np.nan)
+                fig_s = px.line(dfp, x=xcol, y="suscep", title="Susceptibility proxy: d(LCC)/dx")
+                fig_s.update_layout(template="plotly_dark")
+                fig_s = _apply_plot_defaults(fig_s, height=780, y_range=_auto_y_range(dfp["suscep"]))
+                st.plotly_chart(fig_s, use_container_width=True, key="plot_phase_suscep")
+
+            if "mod" in df_res.columns and "l2_lcc" in df_res.columns:
+                dfp2 = df_res.copy()
+                dfp2["mod"] = pd.to_numeric(dfp2["mod"], errors="coerce")
+                dfp2["l2_lcc"] = pd.to_numeric(dfp2["l2_lcc"], errors="coerce")
+                dfp2 = dfp2.dropna(subset=["mod", "l2_lcc"])
+                if not dfp2.empty:
+                    fig_phase = px.line(dfp2, x="l2_lcc", y="mod", title="Phase portrait (trajectory): Q vs λ₂")
+                    fig_phase.update_layout(template="plotly_dark")
+                    fig_phase = _apply_plot_defaults(fig_phase, height=780)
+                    st.plotly_chart(fig_phase, use_container_width=True, key="plot_phase_portrait")
+
+        elif selected_attack_tab == attack_tabs[2]:
             edge_overlay_ui = st.selectbox(
-                "Разметка рёбер",
+                "Разметка рёбер (3D step-by-step)",
                 [
                     "Ricci sign (κ<0/κ>0)",
                     "Energy flux (RW)",
@@ -1364,39 +1851,8 @@ elif selected_main_tab == tab_labels[2]:
                     "None",
                 ],
                 index=0,
+                key="edge_overlay_tabc",
             )
-
-        with col_vis_main:
-            if G_view.number_of_nodes() > 2000:
-                st.warning(f"Граф большой ({G_view.number_of_nodes()} узлов). 3D может тормозить.")
-
-            # Seed учитывает "анти-кэш" и делает layout детерминированным между перерисовками.
-            base_seed = int(seed_val) + int(st.session_state.get("layout_seed_bump", 0))
-
-            # 1) Получаем pos3d (режимы остаются детерминированными через seed).
-            if layout_mode.startswith("Fixed"):
-                pos3d = _layout_cached(
-                    active_entry["id"],
-                    df_hash,
-                    src_col,
-                    dst_col,
-                    float(min_conf),
-                    float(min_weight),
-                    analysis_mode,
-                    base_seed,
-                )
-            else:
-                pos3d = _layout_cached(
-                    active_entry["id"],
-                    df_hash,
-                    src_col,
-                    dst_col,
-                    float(min_conf),
-                    float(min_weight),
-                    analysis_mode,
-                    base_seed,
-                )
-
             edge_overlay = "ricci"
             flow_mode = "rw"
             if edge_overlay_ui.startswith("Energy flux"):
@@ -1409,853 +1865,441 @@ elif selected_main_tab == tab_labels[2]:
             elif edge_overlay_ui.startswith("None"):
                 edge_overlay = "none"
 
-            # 2) Всегда строим трэйсы, чтобы 3D работал и для Fixed, и для Recompute.
-            edge_traces, node_trace = make_3d_traces(
-                G_view,
-                pos3d,
-                show_scale=True,
-                edge_overlay=edge_overlay,
-                flow_mode=flow_mode,
+            base_seed = int(seed_val) + int(st.session_state.get("layout_seed_bump", 0))
+            pos_base = _layout_cached(
+                active_entry.id,
+                df_hash,
+                src_col,
+                dst_col,
+                float(min_conf),
+                float(min_weight),
+                analysis_mode,
+                base_seed,
             )
 
-            # 3) Рисуем внутри col_vis_main, чтобы не ломать сетку.
-            if node_trace is not None:
-                node_trace.marker.size = node_size
-                if show_labels:
-                    node_trace.mode = "markers+text"
-
-                fig_3d = go.Figure(data=[*edge_traces, node_trace])
-                fig_3d.update_layout(
-                    title=f"3D Structure: {active_entry['name']}",
-                    template="plotly_dark",
-                    showlegend=False,
-                    height=820,
-                    margin=dict(l=0, r=0, t=30, b=0),
-                    scene=dict(
-                        xaxis=dict(showbackground=False, showticklabels=False, title=""),
-                        yaxis=dict(showbackground=False, showticklabels=False, title=""),
-                        zaxis=dict(showbackground=False, showticklabels=False, title=""),
-                    ),
-                )
-                st.plotly_chart(fig_3d, use_container_width=True, key="plot_struct_3d")
-            else:
-                st.write("Граф пуст.")
-
-        st.markdown("---")
-        st.subheader("Матрица смежности (heatmap)")
-        if G_view.number_of_nodes() < 1000 and G_view.number_of_nodes() > 0:
-            adj = nx.adjacency_matrix(as_simple_undirected(G_view), weight="weight").todense()
-            fig_hm = px.imshow(adj, title="Adjacency Heatmap", color_continuous_scale="Viridis")
-            fig_hm.update_layout(template="plotly_dark", height=760, width=760)
-            st.plotly_chart(fig_hm, use_container_width=False, key="plot_adj_heatmap")
-        else:
-            st.info("Матрица слишком большая для отображения (N >= 1000) или граф пуст.")
-
-# ------------------------------
-# TAB: NULL MODELS
-# ------------------------------
-elif selected_main_tab == tab_labels[3]:
-    if G_view is None:
-        pass
-    else:
-        st.header("🧪 Нулевые модели и синтетика")
-
-        nm_col1, nm_col2 = st.columns([1, 2])
-
-        with nm_col1:
-            st.subheader("Параметры")
-            null_kind = st.selectbox("Тип модели", ["ER G(n,m)", "Configuration Model", "Mix/Rewire (p)"])
-
-            mix_p = 0.0
-            if null_kind == "Mix/Rewire (p)":
-                mix_p = st.slider("p (rewiring probability)", 0.0, 1.0, 0.2, 0.05, help=help_icon("Mix/Rewire"))
-
-            nm_seed = st.number_input("Seed генерации", value=int(seed_val), step=1)
-            new_name_suffix = st.text_input("Суффикс имени", value="_null")
-
-            if st.button("⚙️ Создать и добавить", type="primary"):
-                with st.spinner("Генерация..."):
-                    if null_kind == "ER G(n,m)":
-                        G_new = make_er_gnm(G_full.number_of_nodes(), G_full.number_of_edges(), seed=int(nm_seed))
-                        src_tag = "ER"
-                    elif null_kind == "Configuration Model":
-                        G_new = make_configuration_model(G_full, seed=int(nm_seed))
-                        src_tag = "CFG"
-                    else:
-                        G_new = rewire_mix(G_full, p=float(mix_p), seed=int(nm_seed))
-                        src_tag = f"MIX(p={mix_p})"
-
-                    edges = [[u, v, 1.0, 1.0] for u, v in as_simple_undirected(G_new).edges()]
-                    df_new = pd.DataFrame(edges, columns=["src", "dst", "weight", "confidence"])
-
-                    add_graph(
-                        name=f"{active_entry['name']}{new_name_suffix}",
-                        df_edges=df_new,
-                        source=f"null:{src_tag}",
-                        tags={"src_col": "src", "dst_col": "dst"}
-                    )
-                    st.success("Граф создан. Переключаюсь на него...")
-                    st.rerun()
-
-        with nm_col2:
-            st.info("Быстрая проверка против ER-ожиданий (очень грубо):")
-            N = G_view.number_of_nodes()
-            M = G_view.number_of_edges()
-            er_density = 2 * M / (N * (N - 1)) if N > 1 else 0.0
-            er_clustering = er_density
-
-            met_light = met  
-            cmp_df = pd.DataFrame({
-                "Metric": ["Avg Degree", "Density", "Clustering (C)", "Modularity (примерно)"],
-                "Active Graph": [met_light.get("avg_degree", np.nan), met_light.get("density", np.nan), met_light.get("clustering", np.nan), met_light.get("mod", np.nan)],
-                "ER Expected": [met_light.get("avg_degree", np.nan), er_density, er_clustering, "~0.0"],
-            })
-            st.dataframe(cmp_df, use_container_width=True)
-
-        # ============================================================
-        # 9) ATTACK LAB (Node + Edge, presets, multi-graph, AUC, phase)
-        # ============================================================
-elif selected_main_tab == tab_labels[4]:
-    if G_view is None:
-        pass
-    else:
-        st.header("💥 Attack Lab (node + edge + weak)")
-
-        # --------------------------
-        # SINGLE RUN
-        # --------------------------
-        st.subheader("Single run")
-        family = st.radio(
-            "Тип атаки",
-            ["Node (узлы)", "Edge (рёбра: слабые/сильные)", "Mix/Entropy (Hrish)"],
-            horizontal=True,
-        )
-
-        col_setup, _ = st.columns([1, 2])
-
-        with col_setup:
-            with st.container(border=True):
-                st.markdown("### Параметры")
-
-                frac = st.slider("Доля удаления", 0.05, 0.95, 0.5, 0.05)
-                steps = st.slider("Шаги", 5, 150, 30)
-                seed_run = st.number_input("Seed", value=int(seed_val), step=1)
-
-                with st.expander("Дополнительно"):
-                    eff_k = st.slider("Efficiency samples (k)", 8, 256, 32)
-                    heavy_freq = st.slider("Тяжёлые метрики каждые N шагов", 1, 10, 2)
-                    tag = st.text_input("Тег", "")
-
-                if family.startswith("Node"):
-                    attack_ui = st.selectbox(
-                        "Стратегия (узлы)",
-                        [
-                            "random",
-                            "degree (Hubs)",
-                            "betweenness (Bridges)",
-                            "kcore (Deep Core)",
-                            "richclub_top (Top Strength)",
-                            "low_degree (Weak nodes)",       
-                            "weak_strength (Weak strength)",
-                        ],
-                    )
-                    kind_map = {
-                        "random": "random",
-                        "degree (Hubs)": "degree",
-                        "betweenness (Bridges)": "betweenness",
-                        "kcore (Deep Core)": "kcore",
-                        "richclub_top (Top Strength)": "richclub_top",
-                        "low_degree (Weak nodes)": "low_degree",
-                        "weak_strength (Weak strength)": "weak_strength",
-                    }
-                    kind = kind_map.get(attack_ui, "random")
-
-                elif family.startswith("Edge"):
-                    attack_ui = st.selectbox(
-                        "Стратегия (рёбра)",
-                        [
-                            "weak_edges_by_weight",
-                            "weak_edges_by_confidence",
-                            "strong_edges_by_weight",
-                            "strong_edges_by_confidence",
-                            "ricci_most_negative (κ min)",
-                            "ricci_most_positive (κ max)",
-                            "ricci_abs_max (|κ| max)",
-                            "flux_high_rw",
-                            "flux_high_evo",
-                            "flux_high_rw_x_neg_ricci",
-                        ],
-                        help=help_icon("Weak edges")
-                    )
-                    kind = str(attack_ui).split(" ")[0]
-
+            if fam == "mix":
+                st.info("Для Mix/Entropy 3D-декомпозиция не поддерживается (нет порядка удаления).")
+            elif fam == "node":
+                removed_order = params.get("removed_order") or []
+                if not removed_order:
+                    st.warning("Нет removed_order для 3D. (src.run_attack не дал, а fallback не сохранился.)")
                 else:
-                    kind = st.selectbox(
-                        "Режим Hrish",
-                        [
-                            "hrish_mix",
-                            "mix_degree_preserving",
-                            "mix_weightconf_preserving",
-                        ],
-                        help="hrish_mix = rewire (degree-preserving) + replace из нулевой модели.",
+                    max_steps = max(1, len(df_res) - 1)
+                    step_val = st.slider(
+                        "Шаг (3D)",
+                        0,
+                        max_steps,
+                        int(st.session_state.get("__decomp_step", 0)),
+                        key="__decomp_step_slider",
                     )
-                    replace_from = st.selectbox("Replace source", ["ER", "CFG"], index=0)
-                    alpha_rewire = st.slider("alpha (rewire)", 0.0, 1.0, 0.6, 0.05)
-                    beta_replace = st.slider("beta (replace)", 0.0, 1.0, 0.4, 0.05)
-                    swaps_per_edge = st.slider("swaps_per_edge", 0.0, 3.0, 0.5, 0.1)
-                    st.caption("Ось X здесь: mix_frac (0..1), а не removed_frac.")
+                    st.session_state["__decomp_step"] = int(step_val)
 
-                if st.button("🚀 RUN", type="primary", use_container_width=True):
-                    if family.startswith("Mix/Entropy"):
-                        with st.spinner(f"Mix attack: {kind}"):
-                            df_hist, aux = run_mix_attack(
-                                G_view,
-                                kind=str(kind),
-                                steps=int(steps),
-                                seed=int(seed_run),
-                                eff_sources_k=int(eff_k),
-                                heavy_every=int(heavy_freq),
-                                alpha_rewire=float(alpha_rewire),
-                                beta_replace=float(beta_replace),
-                                swaps_per_edge=float(swaps_per_edge),
-                                replace_from=str(replace_from),
-                            )
-                            df_hist = _forward_fill_heavy(df_hist)
-                            phase_info = classify_phase_transition(
-                                df_hist.rename(columns={"mix_frac": "removed_frac"})
-                            )
+                    play = st.toggle("▶ Play", value=False, key="play3d")
+                    fps = st.slider("FPS", 1, 10, 3, key="fps3d")
 
-                            label = f"{active_entry['name']} | mix:{kind} | seed={seed_run}"
-                            if tag:
-                                label += f" [{tag}]"
+                    frac_here = float(df_res.iloc[int(step_val)]["removed_frac"]) if "removed_frac" in df_res.columns else (step_val / max_steps)
+                    k_remove = int(round(frac_here * G_view.number_of_nodes()))
+                    k_remove = max(0, min(k_remove, len(removed_order)))
 
-                            save_experiment(
-                                name=label,
-                                graph_id=active_entry["id"],
-                                kind=str(kind),
-                                params={
-                                    "attack_family": "mix",
-                                    "steps": int(steps),
-                                    "seed": int(seed_run),
-                                    "phase": phase_info,
-                                    "eff_k": int(eff_k),
-                                    "heavy_every": int(heavy_freq),
-                                    **aux,
-                                },
-                                df_hist=df_hist,
-                            )
-                        st.success("Готово.")
-                        st.rerun()
+                    removed_set = set(removed_order[:k_remove])
+                    H = as_simple_undirected(G_view).copy()
+                    H.remove_nodes_from([n for n in removed_set if H.has_node(n)])
 
-                    if family.startswith("Node"):
-                        with st.spinner(f"Node attack: {kind}"):
-                            df_hist, aux = run_attack(
-                                G_view, kind, float(frac), int(steps), int(seed_run), int(eff_k),
-                                rc_frac=0.1, compute_heavy_every=int(heavy_freq)
-                            )
-                            df_hist = _forward_fill_heavy(df_hist)
-                            removed_order = _extract_removed_order(aux) or _fallback_removal_order(G_view, kind, int(seed_run))
-                            phase_info = classify_phase_transition(df_hist)
+                    pos_k = {n: pos_base[n] for n in H.nodes() if n in pos_base}
+                    edge_traces, node_trace = make_3d_traces(
+                        H,
+                        pos_k,
+                        show_scale=True,
+                        edge_overlay=edge_overlay,
+                        flow_mode=flow_mode,
+                    )
 
-                            label = f"{active_entry['name']} | node:{kind} | seed={seed_run}"
-                            if tag:
-                                label += f" [{tag}]"
-
-                            save_experiment(
-                                name=label,
-                                graph_id=active_entry["id"],
-                                kind=kind,
-                                params={
-                                    "attack_family": "node",
-                                    "frac": float(frac),
-                                    "steps": int(steps),
-                                    "seed": int(seed_run),
-                                    "phase": phase_info,
-                                    "compute_heavy_every": int(heavy_freq),
-                                    "eff_k": int(eff_k),
-                                    "removed_order": removed_order,
-                                    "mode": "src_run_attack_or_fallback",
-                                },
-                                df_hist=df_hist
-                            )
-                        st.success("Готово.")
-                        st.rerun()
-
+                    if node_trace is not None:
+                        fig = go.Figure(data=[*edge_traces, node_trace])
+                        fig.update_layout(template="plotly_dark", height=860, showlegend=False)
+                        fig.update_layout(title=f"Node removal | step={step_val}/{max_steps} | removed~{k_remove} | frac={frac_here:.3f}")
+                        st.plotly_chart(fig, use_container_width=True, key="plot_attack_3d_node_step")
                     else:
-                        with st.spinner(f"Edge attack: {kind}"):
-                            df_hist, aux = run_edge_attack(
-                                G_view, kind, float(frac), int(steps), int(seed_run), int(eff_k),
-                                compute_heavy_every=int(heavy_freq)
-                            )
-                            df_hist = _forward_fill_heavy(df_hist)
-                            phase_info = classify_phase_transition(df_hist)
+                        st.info("На этом шаге граф пуст.")
 
-                            label = f"{active_entry['name']} | edge:{kind} | seed={seed_run}"
-                            if tag:
-                                label += f" [{tag}]"
-
-                            save_experiment(
-                                name=label,
-                                graph_id=active_entry["id"],
-                                kind=kind,
-                                params={
-                                    "attack_family": "edge",
-                                    "frac": float(frac),
-                                    "steps": int(steps),
-                                    "seed": int(seed_run),
-                                    "phase": phase_info,
-                                    "compute_heavy_every": int(heavy_freq),
-                                    "eff_k": int(eff_k),
-                                    "removed_edges_order": aux.get("removed_edges_order", []),
-                                    "total_edges": aux.get("total_edges", None),
-                                },
-                                df_hist=df_hist
-                            )
-                        st.success("Готово.")
+                    if play:
+                        time.sleep(1.0 / float(fps))
+                        nxt = int(step_val) + 1
+                        if nxt > max_steps:
+                            nxt = 0
+                        st.session_state["__decomp_step"] = nxt
                         st.rerun()
 
-        st.markdown("---")
-        st.markdown("## Последний результат (для текущего графа)")
-
-        exps_here = [e for e in st.session_state["experiments"] if e.get("graph_id") == active_entry["id"]]
-        if not exps_here:
-            st.info("Нет экспериментов. Запусти сверху.")
-        else:
-            exps_here.sort(key=lambda x: x["created_at"], reverse=True)
-            last_exp = exps_here[0]
-            df_res = _forward_fill_heavy(last_exp["history"].copy())
-            params = last_exp.get("params") or {}
-            fam = params.get("attack_family", "node")
-            xcol = "mix_frac" if fam == "mix" and "mix_frac" in df_res.columns else "removed_frac"
-
-            ph = (last_exp.get("params") or {}).get("phase", {})
-            if ph:
-                st.caption(
-                    f"Phase: {'🔥 Abrupt' if ph.get('is_abrupt') else '🌊 Continuous'}"
-                    f" | critical_x ≈ {float(ph.get('critical_x', 0.0)):.3f}"
-                )
-
-            attack_tabs = ["📉 Curves", "🌀 Phase views", "🧊 3D step-by-step"]
-            # Stateful selector avoids tab resets when animation uses st.rerun().
-            selected_attack_tab = st.radio(
-                "Просмотр результатов",
-                attack_tabs,
-                horizontal=True,
-                key="attack_results_tab",
-            )
-
-            if selected_attack_tab == attack_tabs[0]:
-                with st.expander("❔ Что означают метрики на графиках", expanded=False):
-                    st.markdown(
-                        "- **lcc_frac**: доля узлов в гигантской компоненте (порядковый параметр перколяции)\n"
-                        "- **eff_w**: глобальная эффективность (в среднем насколько короткие пути; выше = сеть “связнее”)\n"
-                        "- **l2_lcc**: λ₂ (алгебраическая связность) для LCC; близко к 0 = “на грани распада”\n"
-                        "- **mod**: модульность сообществ; рост часто означает фрагментацию на кластеры\n"
-                        "- **H_***: энтропии распределений (рост “случайности” структуры)\n"
+            else:
+                removed_edges_order = params.get("removed_edges_order") or []
+                total_edges = params.get("total_edges") or len(as_simple_undirected(G_view).edges())
+                if not removed_edges_order:
+                    st.warning("Нет removed_edges_order для 3D.")
+                else:
+                    max_steps = max(1, len(df_res) - 1)
+                    step_val = st.slider(
+                        "Шаг (3D)",
+                        0,
+                        max_steps,
+                        int(st.session_state.get("__decomp_step", 0)),
+                        key="__decomp_step_slider_edge",
                     )
-                fig = fig_metrics_over_steps(
-                    df_res,
-                    title="Метрики по шагам",
-                    normalize_mode=st.session_state["norm_mode"],
-                    height=st.session_state["plot_height"],
-                )
-                fig.update_layout(template="plotly_dark")
-                fig.update_traces(mode="lines+markers")
-                fig.update_traces(line_width=3)
-                fig = _apply_plot_defaults(fig, height=st.session_state["plot_height"])
-                st.plotly_chart(fig, use_container_width=True, key="plot_attack_metrics")
+                    st.session_state["__decomp_step"] = int(step_val)
 
-                st.markdown("#### AUC (robustness) по выбранной метрике")
-                y_axis = st.selectbox(
-                    "Метрика для AUC",
-                    [c for c in ["lcc_frac", "eff_w", "l2_lcc", "mod", "H_deg", "H_w", "H_conf", "H_tri"] if c in df_res.columns],
-                    index=0,
-                    key="auc_y_single",
-                )
-                st.caption(METRIC_HELP.get(y_axis, ""))
+                    play = st.toggle("▶ Play", value=False, key="play3d_edge")
+                    fps = st.slider("FPS", 1, 10, 3, key="fps3d_edge")
 
-                if y_axis in df_res.columns and xcol in df_res.columns:
-                    xs = pd.to_numeric(df_res[xcol], errors="coerce")
-                    ys = pd.to_numeric(df_res[y_axis], errors="coerce")
+                    frac_here = float(df_res.iloc[int(step_val)]["removed_frac"]) if "removed_frac" in df_res.columns else (step_val / max_steps)
+                    k_remove = int(round(frac_here * float(total_edges)))
+                    k_remove = max(0, min(k_remove, len(removed_edges_order)))
+
+                    H = as_simple_undirected(G_view).copy()
+                    for (u, v) in removed_edges_order[:k_remove]:
+                        if H.has_edge(u, v):
+                            H.remove_edge(u, v)
+
+                    pos_k = {n: pos_base[n] for n in H.nodes() if n in pos_base}
+                    edge_traces, node_trace = make_3d_traces(
+                        H,
+                        pos_k,
+                        show_scale=True,
+                        edge_overlay=edge_overlay,
+                        flow_mode=flow_mode,
+                    )
+
+                    if node_trace is not None:
+                        fig = go.Figure(data=[*edge_traces, node_trace])
+                        fig.update_layout(template="plotly_dark", height=860, showlegend=False)
+                        fig.update_layout(title=f"Edge removal | step={step_val}/{max_steps} | removed~{k_remove} edges | frac={frac_here:.3f}")
+                        st.plotly_chart(fig, use_container_width=True, key="plot_attack_3d_edge_step")
+                    else:
+                        st.info("На этом шаге граф пуст.")
+
+                    if play:
+                        time.sleep(1.0 / float(fps))
+                        nxt = int(step_val) + 1
+                        if nxt > max_steps:
+                            nxt = 0
+                        st.session_state["__decomp_step"] = nxt
+                        st.rerun()
+
+    st.markdown("---")
+
+    # --------------------------
+    # PRESET BATCH (same graph)
+    # --------------------------
+    st.subheader("Preset batch (на одном графе)")
+    bcol1, bcol2 = st.columns([1, 2])
+
+    with bcol1:
+        batch_family = st.radio("Batch тип", ["Node presets", "Edge presets"], horizontal=True, key="batch_family")
+
+        if batch_family.startswith("Node"):
+            preset_name = st.selectbox("Preset", list(ATTACK_PRESETS_NODE.keys()), key="preset_node")
+            preset = ATTACK_PRESETS_NODE[preset_name]
+        else:
+            preset_name = st.selectbox("Preset", list(ATTACK_PRESETS_EDGE.keys()), key="preset_edge")
+            preset = ATTACK_PRESETS_EDGE[preset_name]
+
+        frac_b = st.slider("Доля удаления (batch)", 0.05, 0.95, 0.5, 0.05, key="batch_frac")
+        steps_b = st.slider("Шаги (batch)", 5, 150, 30, key="batch_steps")
+        seed_b = st.number_input("Base seed (batch)", value=123, step=1, key="batch_seed")
+
+        with st.expander("Batch advanced"):
+            eff_k_b = st.slider("Efficiency k", 8, 256, 32, key="batch_effk")
+            heavy_b = st.slider("Heavy every N", 1, 10, 2, key="batch_heavy")
+            tag_b = st.text_input("Тег batch", "", key="batch_tag")
+
+        if st.button("🚀 RUN PRESET SUITE", type="primary", use_container_width=True, key="run_suite"):
+            with st.spinner(f"Running preset: {preset_name}"):
+                if batch_family.startswith("Node"):
+                    curves = run_node_attack_suite(
+                        G_view, active_entry, preset,
+                        frac=float(frac_b), steps=int(steps_b), base_seed=int(seed_b),
+                        eff_k=int(eff_k_b), heavy_freq=int(heavy_b),
+                        rc_frac=0.1, tag=tag_b
+                    )
+                else:
+                    curves = run_edge_attack_suite(
+                        G_view, active_entry, preset,
+                        frac=float(frac_b), steps=int(steps_b), base_seed=int(seed_b),
+                        eff_k=int(eff_k_b), heavy_freq=int(heavy_b),
+                        tag=tag_b
+                    )
+
+            st.session_state["last_suite_curves"] = curves
+            st.success(f"Готово: {len(curves)} прогонов сохранено.")
+            st.rerun()
+
+    with bcol2:
+        curves = st.session_state.get("last_suite_curves")
+        if curves:
+            st.markdown("### Сравнение suite")
+            y_axis = st.selectbox("Y", ["lcc_frac", "eff_w", "l2_lcc", "mod"], index=0, key="suite_y")
+            fig = fig_compare_attacks(
+                curves,
+                "removed_frac",
+                y_axis,
+                f"Suite compare: {y_axis}",
+                normalize_mode=st.session_state["norm_mode"],
+                height=st.session_state["plot_height"],
+            )
+            fig.update_layout(template="plotly_dark")
+            all_y = pd.concat([pd.to_numeric(df[y_axis], errors="coerce") for _, df in curves if y_axis in df.columns], ignore_index=True)
+            fig = _apply_plot_defaults(fig, height=st.session_state["plot_height"], y_range=_auto_y_range(all_y))
+            st.plotly_chart(fig, use_container_width=True, key="plot_suite_compare")
+
+            st.markdown("#### AUC ranking")
+            rows = []
+            for name, df in curves:
+                if "removed_frac" in df.columns and y_axis in df.columns:
+                    xs = pd.to_numeric(df["removed_frac"], errors="coerce")
+                    ys = pd.to_numeric(df[y_axis], errors="coerce")
                     mask = xs.notna() & ys.notna()
                     if mask.sum() >= 2:
-                        auc_val = float(AUC_TRAP(ys[mask].to_numpy(), xs[mask].to_numpy()))
-                        st.metric("AUC", f"{auc_val:.6f}")
-                    else:
-                        st.info("Недостаточно точек для AUC.")
+                        rows.append({"run": name, "AUC": float(AUC_TRAP(ys[mask].to_numpy(), xs[mask].to_numpy()))})
+            if rows:
+                df_auc = pd.DataFrame(rows).sort_values("AUC", ascending=False)
+                st.dataframe(df_auc, use_container_width=True)
+        else:
+            st.info("Запусти suite слева, чтобы увидеть сравнение.")
 
-                with st.expander("❓ Что на этих графиках", expanded=False):
-                    txt = """
-                    Ось X:
-                      - removed_frac: доля удалённых узлов/рёбер (атаки).
-                      - mix_frac: уровень энтропизации (Hrish mix), 0..1.
+    st.markdown("---")
 
-                    Ось Y:
-                      - lcc_frac: доля LCC (перколяция).
-                      - eff_w: эффективность (качество глобальной связности путей).
-                      - l2_lcc: λ₂ (спектральная связность LCC).
-                      - mod: модульность (структура сообществ).
-                      - H_*: энтропии распределений (рост “случайности”).
-                    """
-                    st.text(textwrap.dedent(txt).strip())
+    # --------------------------
+    # MULTI-GRAPH BATCH
+    # --------------------------
+    st.subheader("Multi-graph batch (на нескольких графах)")
+    graphs = st.session_state["graphs"]
+    gid_list = list(graphs.keys())
 
-            elif selected_attack_tab == attack_tabs[1]:
-                if xcol in df_res.columns and "lcc_frac" in df_res.columns:
-                    fig_lcc = px.line(df_res, x=xcol, y="lcc_frac", title="Order parameter: LCC fraction vs removed fraction")
-                    fig_lcc.update_layout(template="plotly_dark")
-                    fig_lcc = _apply_plot_defaults(fig_lcc, height=780, y_range=_auto_y_range(df_res["lcc_frac"]))
-                    st.plotly_chart(fig_lcc, use_container_width=True, key="plot_phase_lcc")
+    mg_col1, mg_col2 = st.columns([1, 2])
 
-                if xcol in df_res.columns and "lcc_frac" in df_res.columns:
-                    dfp = df_res.sort_values(xcol).copy()
-                    dx = pd.to_numeric(dfp[xcol], errors="coerce").diff()
-                    dy = pd.to_numeric(dfp["lcc_frac"], errors="coerce").diff()
-                    dfp["suscep"] = (dy / dx).replace([np.inf, -np.inf], np.nan)
-                    fig_s = px.line(dfp, x=xcol, y="suscep", title="Susceptibility proxy: d(LCC)/dx")
-                    fig_s.update_layout(template="plotly_dark")
-                    fig_s = _apply_plot_defaults(fig_s, height=780, y_range=_auto_y_range(dfp["suscep"]))
-                    st.plotly_chart(fig_s, use_container_width=True, key="plot_phase_suscep")
+    with mg_col1:
+        mg_family = st.radio("Multi тип", ["Node presets", "Edge presets"], horizontal=True, key="mg_family")
 
-                if "mod" in df_res.columns and "l2_lcc" in df_res.columns:
-                    dfp2 = df_res.copy()
-                    dfp2["mod"] = pd.to_numeric(dfp2["mod"], errors="coerce")
-                    dfp2["l2_lcc"] = pd.to_numeric(dfp2["l2_lcc"], errors="coerce")
-                    dfp2 = dfp2.dropna(subset=["mod", "l2_lcc"])
-                    if not dfp2.empty:
-                        fig_phase = px.line(dfp2, x="l2_lcc", y="mod", title="Phase portrait (trajectory): Q vs λ₂")
-                        fig_phase.update_layout(template="plotly_dark")
-                        fig_phase = _apply_plot_defaults(fig_phase, height=780)
-                        st.plotly_chart(fig_phase, use_container_width=True, key="plot_phase_portrait")
+        sel_gids = st.selectbox(
+            "Графы (multi) — выбери несколько в списке ниже",
+            options=["(выбрать ниже)"],
+            index=0,
+            help="Основной выбор — в multiselect ниже"
+        )
 
-            elif selected_attack_tab == attack_tabs[2]:
-                edge_overlay_ui = st.selectbox(
-                    "Разметка рёбер (3D step-by-step)",
-                    [
-                        "Ricci sign (κ<0/κ>0)",
-                        "Energy flux (RW)",
-                        "Energy flux (Demetrius)",
-                        "Weight (log10)",
-                        "Confidence",
-                        "None",
-                    ],
-                    index=0,
-                    key="edge_overlay_tabc",
-                )
-                edge_overlay = "ricci"
-                flow_mode = "rw"
-                if edge_overlay_ui.startswith("Energy flux"):
-                    edge_overlay = "flux"
-                    flow_mode = "evo" if "Demetrius" in edge_overlay_ui else "rw"
-                elif edge_overlay_ui.startswith("Weight"):
-                    edge_overlay = "weight"
-                elif edge_overlay_ui.startswith("Confidence"):
-                    edge_overlay = "confidence"
-                elif edge_overlay_ui.startswith("None"):
-                    edge_overlay = "none"
+        sel_gids = st.multiselect(
+            "Выбери графы",
+            gid_list,
+            default=[st.session_state["active_graph_id"]] if st.session_state["active_graph_id"] else [],
+            format_func=lambda gid: f"{graphs[gid].name} ({graphs[gid].source})",
+            key="mg_gids"
+        )
 
-                base_seed = int(seed_val) + int(st.session_state.get("layout_seed_bump", 0))
-                pos_base = _layout_cached(
-                    active_entry["id"],
-                    df_hash,
-                    src_col,
-                    dst_col,
-                    float(min_conf),
-                    float(min_weight),
-                    analysis_mode,
-                    base_seed,
-                )
+        if mg_family.startswith("Node"):
+            preset_name_mg = st.selectbox("Preset (multi)", list(ATTACK_PRESETS_NODE.keys()), key="mg_preset_node")
+            preset_mg = ATTACK_PRESETS_NODE[preset_name_mg]
+        else:
+            preset_name_mg = st.selectbox("Preset (multi)", list(ATTACK_PRESETS_EDGE.keys()), key="mg_preset_edge")
+            preset_mg = ATTACK_PRESETS_EDGE[preset_name_mg]
 
-                if fam == "mix":
-                    st.info("Для Mix/Entropy 3D-декомпозиция не поддерживается (нет порядка удаления).")
-                elif fam == "node":
-                    removed_order = params.get("removed_order") or []
-                    if not removed_order:
-                        st.warning("Нет removed_order для 3D. (src.run_attack не дал, а fallback не сохранился.)")
-                    else:
-                        max_steps = max(1, len(df_res) - 1)
-                        step_val = st.slider("Шаг (3D)", 0, max_steps, int(st.session_state.get("__decomp_step", 0)), key="__decomp_step_slider")
-                        st.session_state["__decomp_step"] = int(step_val)
+        mg_frac = st.slider("Доля удаления", 0.05, 0.95, 0.5, 0.05, key="mg_frac")
+        mg_steps = st.slider("Шаги", 5, 150, 30, key="mg_steps")
+        mg_seed = st.number_input("Base seed", value=321, step=1, key="mg_seed")
 
-                        play = st.toggle("▶ Play", value=False, key="play3d")
-                        fps = st.slider("FPS", 1, 10, 3, key="fps3d")
+        with st.expander("Multi advanced"):
+            mg_effk = st.slider("Efficiency k", 8, 256, 32, key="mg_effk")
+            mg_heavy = st.slider("Heavy every N", 1, 10, 2, key="mg_heavy")
+            mg_tag = st.text_input("Тег multi", "", key="mg_tag")
 
-                        frac_here = float(df_res.iloc[int(step_val)]["removed_frac"]) if "removed_frac" in df_res.columns else (step_val / max_steps)
-                        k_remove = int(round(frac_here * G_view.number_of_nodes()))
-                        k_remove = max(0, min(k_remove, len(removed_order)))
-
-                        removed_set = set(removed_order[:k_remove])
-                        H = as_simple_undirected(G_view).copy()
-                        H.remove_nodes_from([n for n in removed_set if H.has_node(n)])
-
-                        pos_k = {n: pos_base[n] for n in H.nodes() if n in pos_base}
-                        edge_traces, node_trace = make_3d_traces(
-                            H,
-                            pos_k,
-                            show_scale=True,
-                            edge_overlay=edge_overlay,
-                            flow_mode=flow_mode,
-                        )
-
-                        if node_trace is not None:
-                            fig = go.Figure(data=[*edge_traces, node_trace])
-                            fig.update_layout(template="plotly_dark", height=860, showlegend=False)
-                            fig.update_layout(title=f"Node removal | step={step_val}/{max_steps} | removed~{k_remove} | frac={frac_here:.3f}")
-                            st.plotly_chart(fig, use_container_width=True, key="plot_attack_3d_node_step")
-                        else:
-                            st.info("На этом шаге граф пуст.")
-
-                        if play:
-                            time.sleep(1.0 / float(fps))
-                            nxt = int(step_val) + 1
-                            if nxt > max_steps:
-                                nxt = 0
-                            st.session_state["__decomp_step"] = nxt
-                            st.rerun()
-
-                else:
-                    removed_edges_order = params.get("removed_edges_order") or []
-                    total_edges = params.get("total_edges") or len(as_simple_undirected(G_view).edges())
-                    if not removed_edges_order:
-                        st.warning("Нет removed_edges_order для 3D.")
-                    else:
-                        max_steps = max(1, len(df_res) - 1)
-                        step_val = st.slider("Шаг (3D)", 0, max_steps, int(st.session_state.get("__decomp_step", 0)), key="__decomp_step_slider_edge")
-                        st.session_state["__decomp_step"] = int(step_val)
-
-                        play = st.toggle("▶ Play", value=False, key="play3d_edge")
-                        fps = st.slider("FPS", 1, 10, 3, key="fps3d_edge")
-
-                        frac_here = float(df_res.iloc[int(step_val)]["removed_frac"]) if "removed_frac" in df_res.columns else (step_val / max_steps)
-                        k_remove = int(round(frac_here * float(total_edges)))
-                        k_remove = max(0, min(k_remove, len(removed_edges_order)))
-
-                        H = as_simple_undirected(G_view).copy()
-                        for (u, v) in removed_edges_order[:k_remove]:
-                            if H.has_edge(u, v):
-                                H.remove_edge(u, v)
-
-                        pos_k = {n: pos_base[n] for n in H.nodes() if n in pos_base}
-                        edge_traces, node_trace = make_3d_traces(
-                            H,
-                            pos_k,
-                            show_scale=True,
-                            edge_overlay=edge_overlay,
-                            flow_mode=flow_mode,
-                        )
-
-                        if node_trace is not None:
-                            fig = go.Figure(data=[*edge_traces, node_trace])
-                            fig.update_layout(template="plotly_dark", height=860, showlegend=False)
-                            fig.update_layout(title=f"Edge removal | step={step_val}/{max_steps} | removed~{k_remove} edges | frac={frac_here:.3f}")
-                            st.plotly_chart(fig, use_container_width=True, key="plot_attack_3d_edge_step")
-                        else:
-                            st.info("На этом шаге граф пуст.")
-
-                        if play:
-                            time.sleep(1.0 / float(fps))
-                            nxt = int(step_val) + 1
-                            if nxt > max_steps:
-                                nxt = 0
-                            st.session_state["__decomp_step"] = nxt
-                            st.rerun()
-
-        st.markdown("---")
-
-        # --------------------------
-        # PRESET BATCH (same graph)
-        # --------------------------
-        st.subheader("Preset batch (на одном графе)")
-        bcol1, bcol2 = st.columns([1, 2])
-
-        with bcol1:
-            batch_family = st.radio("Batch тип", ["Node presets", "Edge presets"], horizontal=True, key="batch_family")
-
-            if batch_family.startswith("Node"):
-                preset_name = st.selectbox("Preset", list(ATTACK_PRESETS_NODE.keys()), key="preset_node")
-                preset = ATTACK_PRESETS_NODE[preset_name]
+        if st.button("🚀 RUN MULTI-GRAPH SUITE", type="primary", use_container_width=True, key="run_mg"):
+            if not sel_gids:
+                st.error("Выбери хотя бы один граф.")
             else:
-                preset_name = st.selectbox("Preset", list(ATTACK_PRESETS_EDGE.keys()), key="preset_edge")
-                preset = ATTACK_PRESETS_EDGE[preset_name]
-
-            frac_b = st.slider("Доля удаления (batch)", 0.05, 0.95, 0.5, 0.05, key="batch_frac")
-            steps_b = st.slider("Шаги (batch)", 5, 150, 30, key="batch_steps")
-            seed_b = st.number_input("Base seed (batch)", value=123, step=1, key="batch_seed")
-
-            with st.expander("Batch advanced"):
-                eff_k_b = st.slider("Efficiency k", 8, 256, 32, key="batch_effk")
-                heavy_b = st.slider("Heavy every N", 1, 10, 2, key="batch_heavy")
-                tag_b = st.text_input("Тег batch", "", key="batch_tag")
-
-            if st.button("🚀 RUN PRESET SUITE", type="primary", use_container_width=True, key="run_suite"):
-                with st.spinner(f"Running preset: {preset_name}"):
-                    if batch_family.startswith("Node"):
-                        curves = run_node_attack_suite(
-                            G_view, active_entry, preset,
-                            frac=float(frac_b), steps=int(steps_b), base_seed=int(seed_b),
-                            eff_k=int(eff_k_b), heavy_freq=int(heavy_b),
-                            rc_frac=0.1, tag=tag_b
+                all_curves = []
+                with st.spinner("Running multi-graph suite..."):
+                    for gid in sel_gids:
+                        entry = graphs[gid]
+                        _df = filter_edges(
+                            entry.edges_df,
+                            entry.meta_tags.get("src_col", "src"),
+                            entry.meta_tags.get("dst_col", "dst"),
+                            min_conf, min_weight
                         )
-                    else:
-                        curves = run_edge_attack_suite(
-                            G_view, active_entry, preset,
-                            frac=float(frac_b), steps=int(steps_b), base_seed=int(seed_b),
-                            eff_k=int(eff_k_b), heavy_freq=int(heavy_b),
-                            tag=tag_b
+                        _G = build_graph_from_edges(
+                            _df,
+                            entry.meta_tags.get("src_col", "src"),
+                            entry.meta_tags.get("dst_col", "dst"),
                         )
+                        if analysis_mode.startswith("LCC"):
+                            _G = lcc_subgraph(_G)
 
-                st.session_state["last_suite_curves"] = curves
-                st.success(f"Готово: {len(curves)} прогонов сохранено.")
+                        if mg_family.startswith("Node"):
+                            curves = run_node_attack_suite(
+                                _G, entry, preset_mg,
+                                frac=float(mg_frac), steps=int(mg_steps),
+                                base_seed=int(mg_seed), eff_k=int(mg_effk),
+                                heavy_freq=int(mg_heavy),
+                                rc_frac=0.1,
+                                tag=f"MG:{mg_tag}"
+                            )
+                        else:
+                            curves = run_edge_attack_suite(
+                                _G, entry, preset_mg,
+                                frac=float(mg_frac), steps=int(mg_steps),
+                                base_seed=int(mg_seed), eff_k=int(mg_effk),
+                                heavy_freq=int(mg_heavy),
+                                tag=f"MG:{mg_tag}"
+                            )
+
+                        all_curves.extend(curves)
+
+                st.session_state["last_multi_curves"] = all_curves
+                st.success(f"Готово: {len(all_curves)} прогонов.")
                 st.rerun()
 
-        with bcol2:
-            curves = st.session_state.get("last_suite_curves")
-            if curves:
-                st.markdown("### Сравнение suite")
-                y_axis = st.selectbox("Y", ["lcc_frac", "eff_w", "l2_lcc", "mod"], index=0, key="suite_y")
-                fig = fig_compare_attacks(
+    with mg_col2:
+        multi_curves = st.session_state.get("last_multi_curves")
+        if multi_curves:
+            st.markdown("### Multi сравнение")
+            y = st.selectbox("Y (multi)", ["lcc_frac", "eff_w", "l2_lcc", "mod"], index=0, key="mg_y")
+            fig = fig_compare_attacks(
+                multi_curves,
+                "removed_frac",
+                y,
+                f"Multi compare: {y}",
+                normalize_mode=st.session_state["norm_mode"],
+                height=st.session_state["plot_height"],
+            )
+            fig.update_layout(template="plotly_dark")
+            all_y = pd.concat([pd.to_numeric(df[y], errors="coerce") for _, df in multi_curves if y in df.columns], ignore_index=True)
+            fig = _apply_plot_defaults(fig, height=st.session_state["plot_height"], y_range=_auto_y_range(all_y))
+            st.plotly_chart(fig, use_container_width=True, key="plot_multi_compare")
+        else:
+            st.info("Запусти multi suite слева, чтобы увидеть сравнение.")
+
+
+def tab_compare() -> None:
+    """Render the compare tab."""
+    if G_view is None:
+        return
+
+    st.header("🆚 Сравнение")
+
+    mode_cmp = st.radio("Что сравниваем?", ["Графы (скаляры)", "Эксперименты (траектории)"], horizontal=True)
+
+    graphs = st.session_state["graphs"]
+    all_gids = list(graphs.keys())
+
+    if mode_cmp.startswith("Графы"):
+        st.subheader("Сравнение скаляров по графам")
+        selected_gids = st.multiselect(
+            "Выберите графы",
+            all_gids,
+            default=[active_entry.id] if active_entry.id in all_gids else [],
+            format_func=lambda gid: f"{graphs[gid].name} ({graphs[gid].source})",
+        )
+
+        scalar_metric = st.selectbox(
+            "Метрика",
+            ["density", "l2_lcc", "mod", "eff_w", "avg_degree", "clustering", "assortativity", "lcc_frac"],
+            index=1
+        )
+
+        if selected_gids:
+            rows = []
+            for gid in selected_gids:
+                entry = graphs[gid]
+                _df = filter_edges(
+                    entry.edges_df,
+                    entry.meta_tags.get("src_col", "src"),
+                    entry.meta_tags.get("dst_col", "dst"),
+                    min_conf, min_weight
+                )
+                _G = build_graph_from_edges(
+                    _df,
+                    entry.meta_tags.get("src_col", "src"),
+                    entry.meta_tags.get("dst_col", "dst"),
+                )
+                if analysis_mode.startswith("LCC"):
+                    _G = lcc_subgraph(_G)
+
+                _m = calculate_metrics(_G, eff_sources_k=16, seed=42)
+                rows.append({"Name": entry.name, scalar_metric: _m.get(scalar_metric, np.nan)})
+
+            df_cmp = pd.DataFrame(rows)
+            fig_bar = px.bar(df_cmp, x="Name", y=scalar_metric, title=f"Comparison: {scalar_metric}", color="Name")
+            fig_bar.update_layout(template="plotly_dark", height=780)
+            st.plotly_chart(fig_bar, use_container_width=True, key="plot_compare_bar")
+            st.dataframe(df_cmp, use_container_width=True)
+        else:
+            st.info("Выбери графы.")
+
+    else:
+        st.subheader("Сравнение экспериментов (кривые)")
+        exps = st.session_state["experiments"]
+        if not exps:
+            st.warning("Нет сохраненных экспериментов.")
+        else:
+            exp_opts = {e.id: e.name for e in exps}
+            sel_exps = st.multiselect("Выберите эксперименты", list(exp_opts.keys()), format_func=lambda x: exp_opts[x])
+
+            y_axis = st.selectbox("Y Axis", ["lcc_frac", "eff_w", "mod", "l2_lcc"], index=0)
+            if sel_exps:
+                curves = []
+                x_candidates = []
+                for eid in sel_exps:
+                    e = next(x for x in exps if x.id == eid)
+                    df_hist = _forward_fill_heavy(e.history)
+                    curves.append((e.name, df_hist))
+                    if "mix_frac" in df_hist.columns:
+                        x_candidates.append("mix_frac")
+                    else:
+                        x_candidates.append("removed_frac")
+
+                x_col = "mix_frac" if x_candidates and all(x == "mix_frac" for x in x_candidates) else "removed_frac"
+
+                fig_lines = fig_compare_attacks(
                     curves,
-                    "removed_frac",
+                    x_col,
                     y_axis,
-                    f"Suite compare: {y_axis}",
+                    f"Comparison: {y_axis}",
                     normalize_mode=st.session_state["norm_mode"],
                     height=st.session_state["plot_height"],
                 )
-                fig.update_layout(template="plotly_dark")
+                fig_lines.update_layout(template="plotly_dark")
                 all_y = pd.concat([pd.to_numeric(df[y_axis], errors="coerce") for _, df in curves if y_axis in df.columns], ignore_index=True)
-                fig = _apply_plot_defaults(fig, height=st.session_state["plot_height"], y_range=_auto_y_range(all_y))
-                st.plotly_chart(fig, use_container_width=True, key="plot_suite_compare")
+                fig_lines = _apply_plot_defaults(fig_lines, height=st.session_state["plot_height"], y_range=_auto_y_range(all_y))
+                st.plotly_chart(fig_lines, use_container_width=True, key="plot_compare_lines")
 
-                st.markdown("#### AUC ranking")
-                rows = []
+                st.markdown("#### Robustness (AUC)")
+                auc_rows = []
                 for name, df in curves:
-                    if "removed_frac" in df.columns and y_axis in df.columns:
-                        xs = pd.to_numeric(df["removed_frac"], errors="coerce")
+                    if y_axis in df.columns and x_col in df.columns:
+                        xs = pd.to_numeric(df[x_col], errors="coerce")
                         ys = pd.to_numeric(df[y_axis], errors="coerce")
                         mask = xs.notna() & ys.notna()
                         if mask.sum() >= 2:
-                            rows.append({"run": name, "AUC": float(AUC_TRAP(ys[mask].to_numpy(), xs[mask].to_numpy()))})
-                if rows:
-                    df_auc = pd.DataFrame(rows).sort_values("AUC", ascending=False)
-                    st.dataframe(df_auc, use_container_width=True)
+                            auc = float(AUC_TRAP(ys[mask].to_numpy(), xs[mask].to_numpy()))
+                            auc_rows.append({"Experiment": name, "AUC": auc})
+
+                if auc_rows:
+                    st.dataframe(pd.DataFrame(auc_rows).sort_values("AUC", ascending=False), use_container_width=True)
             else:
-                st.info("Запусти suite слева, чтобы увидеть сравнение.")
+                st.info("Выбери эксперименты.")
 
-        st.markdown("---")
 
-        # --------------------------
-        # MULTI-GRAPH BATCH
-        # --------------------------
-        st.subheader("Multi-graph batch (на нескольких графах)")
-        graphs = st.session_state["graphs"]
-        gid_list = list(graphs.keys())
+TABS_MAP = {
+    tab_labels[0]: tab_dashboard,
+    tab_labels[1]: tab_energy,
+    tab_labels[2]: tab_structure,
+    tab_labels[3]: tab_null_models,
+    tab_labels[4]: tab_attack_lab,
+    tab_labels[5]: tab_compare,
+}
 
-        mg_col1, mg_col2 = st.columns([1, 2])
+if selected_main_tab in TABS_MAP:
+    TABS_MAP[selected_main_tab]()
 
-        with mg_col1:
-            mg_family = st.radio("Multi тип", ["Node presets", "Edge presets"], horizontal=True, key="mg_family")
-
-            sel_gids = st.selectbox(
-                "Графы (multi) — выбери несколько в списке ниже",
-                options=["(выбрать ниже)"],
-                index=0,
-                help="Основной выбор — в multiselect ниже"
-            )
-
-            sel_gids = st.multiselect(
-                "Выбери графы",
-                gid_list,
-                default=[st.session_state["active_graph_id"]] if st.session_state["active_graph_id"] else [],
-                format_func=lambda gid: f"{graphs[gid]['name']} ({graphs[gid]['source']})",
-                key="mg_gids"
-            )
-
-            if mg_family.startswith("Node"):
-                preset_name_mg = st.selectbox("Preset (multi)", list(ATTACK_PRESETS_NODE.keys()), key="mg_preset_node")
-                preset_mg = ATTACK_PRESETS_NODE[preset_name_mg]
-            else:
-                preset_name_mg = st.selectbox("Preset (multi)", list(ATTACK_PRESETS_EDGE.keys()), key="mg_preset_edge")
-                preset_mg = ATTACK_PRESETS_EDGE[preset_name_mg]
-
-            mg_frac = st.slider("Доля удаления", 0.05, 0.95, 0.5, 0.05, key="mg_frac")
-            mg_steps = st.slider("Шаги", 5, 150, 30, key="mg_steps")
-            mg_seed = st.number_input("Base seed", value=321, step=1, key="mg_seed")
-
-            with st.expander("Multi advanced"):
-                mg_effk = st.slider("Efficiency k", 8, 256, 32, key="mg_effk")
-                mg_heavy = st.slider("Heavy every N", 1, 10, 2, key="mg_heavy")
-                mg_tag = st.text_input("Тег multi", "", key="mg_tag")
-
-            if st.button("🚀 RUN MULTI-GRAPH SUITE", type="primary", use_container_width=True, key="run_mg"):
-                if not sel_gids:
-                    st.error("Выбери хотя бы один граф.")
-                else:
-                    all_curves = []
-                    with st.spinner("Running multi-graph suite..."):
-                        for gid in sel_gids:
-                            entry = graphs[gid]
-                            _df = filter_edges(
-                                entry["edges"],
-                                entry["tags"].get("src_col", "src"),
-                                entry["tags"].get("dst_col", "dst"),
-                                min_conf, min_weight
-                            )
-                            _G = build_graph_from_edges(_df, entry["tags"].get("src_col", "src"), entry["tags"].get("dst_col", "dst"))
-                            if analysis_mode.startswith("LCC"):
-                                _G = lcc_subgraph(_G)
-
-                            if mg_family.startswith("Node"):
-                                curves = run_node_attack_suite(
-                                    _G, entry, preset_mg,
-                                    frac=float(mg_frac), steps=int(mg_steps),
-                                    base_seed=int(mg_seed), eff_k=int(mg_effk),
-                                    heavy_freq=int(mg_heavy),
-                                    rc_frac=0.1,
-                                    tag=f"MG:{mg_tag}"
-                                )
-                            else:
-                                curves = run_edge_attack_suite(
-                                    _G, entry, preset_mg,
-                                    frac=float(mg_frac), steps=int(mg_steps),
-                                    base_seed=int(mg_seed), eff_k=int(mg_effk),
-                                    heavy_freq=int(mg_heavy),
-                                    tag=f"MG:{mg_tag}"
-                                )
-
-                            all_curves.extend(curves)
-
-                    st.session_state["last_multi_curves"] = all_curves
-                    st.success(f"Готово: {len(all_curves)} прогонов.")
-                    st.rerun()
-
-        with mg_col2:
-            multi_curves = st.session_state.get("last_multi_curves")
-            if multi_curves:
-                st.markdown("### Multi сравнение")
-                y = st.selectbox("Y (multi)", ["lcc_frac", "eff_w", "l2_lcc", "mod"], index=0, key="mg_y")
-                fig = fig_compare_attacks(
-                    multi_curves,
-                    "removed_frac",
-                    y,
-                    f"Multi compare: {y}",
-                    normalize_mode=st.session_state["norm_mode"],
-                    height=st.session_state["plot_height"],
-                )
-                fig.update_layout(template="plotly_dark")
-                all_y = pd.concat([pd.to_numeric(df[y], errors="coerce") for _, df in multi_curves if y in df.columns], ignore_index=True)
-                fig = _apply_plot_defaults(fig, height=st.session_state["plot_height"], y_range=_auto_y_range(all_y))
-                st.plotly_chart(fig, use_container_width=True, key="plot_multi_compare")
-            else:
-                st.info("Запусти multi suite слева, чтобы увидеть сравнение.")
-
-        # ============================================================
-        # 10) COMPARE TAB (saved graphs + saved experiments)
-        # ============================================================
-elif selected_main_tab == tab_labels[5]:
-    if G_view is None:
-        pass
-    else:
-        st.header("🆚 Сравнение")
-
-        mode_cmp = st.radio("Что сравниваем?", ["Графы (скаляры)", "Эксперименты (траектории)"], horizontal=True)
-
-        graphs = st.session_state["graphs"]
-        all_gids = list(graphs.keys())
-
-        if mode_cmp.startswith("Графы"):
-            st.subheader("Сравнение скаляров по графам")
-            selected_gids = st.multiselect(
-                "Выберите графы",
-                all_gids,
-                default=[active_entry["id"]] if active_entry["id"] in all_gids else [],
-                format_func=lambda gid: f"{graphs[gid]['name']} ({graphs[gid]['source']})",
-            )
-
-            scalar_metric = st.selectbox(
-                "Метрика",
-                ["density", "l2_lcc", "mod", "eff_w", "avg_degree", "clustering", "assortativity", "lcc_frac"],
-                index=1
-            )
-
-            if selected_gids:
-                rows = []
-                for gid in selected_gids:
-                    entry = graphs[gid]
-                    _df = filter_edges(
-                        entry["edges"],
-                        entry["tags"].get("src_col", "src"),
-                        entry["tags"].get("dst_col", "dst"),
-                        min_conf, min_weight
-                    )
-                    _G = build_graph_from_edges(_df, entry["tags"].get("src_col", "src"), entry["tags"].get("dst_col", "dst"))
-                    if analysis_mode.startswith("LCC"):
-                        _G = lcc_subgraph(_G)
-
-                    _m = calculate_metrics(_G, eff_sources_k=16, seed=42)
-                    rows.append({"Name": entry["name"], scalar_metric: _m.get(scalar_metric, np.nan)})
-
-                df_cmp = pd.DataFrame(rows)
-                fig_bar = px.bar(df_cmp, x="Name", y=scalar_metric, title=f"Comparison: {scalar_metric}", color="Name")
-                fig_bar.update_layout(template="plotly_dark", height=780)
-                st.plotly_chart(fig_bar, use_container_width=True, key="plot_compare_bar")
-                st.dataframe(df_cmp, use_container_width=True)
-            else:
-                st.info("Выбери графы.")
-
-        else:
-            st.subheader("Сравнение экспериментов (кривые)")
-            exps = st.session_state["experiments"]
-            if not exps:
-                st.warning("Нет сохраненных экспериментов.")
-            else:
-                exp_opts = {e["id"]: e["name"] for e in exps}
-                sel_exps = st.multiselect("Выберите эксперименты", list(exp_opts.keys()), format_func=lambda x: exp_opts[x])
-
-                y_axis = st.selectbox("Y Axis", ["lcc_frac", "eff_w", "mod", "l2_lcc"], index=0)
-                if sel_exps:
-                    curves = []
-                    x_candidates = []
-                    for eid in sel_exps:
-                        e = next(x for x in exps if x["id"] == eid)
-                        df_hist = _forward_fill_heavy(e["history"])
-                        curves.append((e["name"], df_hist))
-                        if "mix_frac" in df_hist.columns:
-                            x_candidates.append("mix_frac")
-                        else:
-                            x_candidates.append("removed_frac")
-
-                    x_col = "mix_frac" if x_candidates and all(x == "mix_frac" for x in x_candidates) else "removed_frac"
-
-                    fig_lines = fig_compare_attacks(
-                        curves,
-                        x_col,
-                        y_axis,
-                        f"Comparison: {y_axis}",
-                        normalize_mode=st.session_state["norm_mode"],
-                        height=st.session_state["plot_height"],
-                    )
-                    fig_lines.update_layout(template="plotly_dark")
-                    all_y = pd.concat([pd.to_numeric(df[y_axis], errors="coerce") for _, df in curves if y_axis in df.columns], ignore_index=True)
-                    fig_lines = _apply_plot_defaults(fig_lines, height=st.session_state["plot_height"], y_range=_auto_y_range(all_y))
-                    st.plotly_chart(fig_lines, use_container_width=True, key="plot_compare_lines")
-
-                    st.markdown("#### Robustness (AUC)")
-                    auc_rows = []
-                    for name, df in curves:
-                        if y_axis in df.columns and x_col in df.columns:
-                            xs = pd.to_numeric(df[x_col], errors="coerce")
-                            ys = pd.to_numeric(df[y_axis], errors="coerce")
-                            mask = xs.notna() & ys.notna()
-                            if mask.sum() >= 2:
-                                auc = float(AUC_TRAP(ys[mask].to_numpy(), xs[mask].to_numpy()))
-                                auc_rows.append({"Experiment": name, "AUC": auc})
-
-                    if auc_rows:
-                        st.dataframe(pd.DataFrame(auc_rows).sort_values("AUC", ascending=False), use_container_width=True)
-                else:
-                    st.info("Выбери эксперименты.")
-
-        # ============================================================
-        # 11) FOOTER
-        # ============================================================
+# ============================================================
+# 11) FOOTER
+# ============================================================
 st.markdown("---")
 st.caption("Kodik Lab | Streamlit + NetworkX | node/edge attacks + weak percolation")
