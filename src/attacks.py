@@ -271,7 +271,7 @@ def run_edge_attack(
         "strong_edges_by_confidence",
     ):
         if "confidence" in kind:
-            key = lambda e: _safe_float(e[2].get("confidence", 1.0), 1.0)
+            key = lambda e: float(e[2].get("confidence", 1.0))
         else:
             key = lambda e: _safe_float(e[2].get("weight", 1.0), 1.0)
         edges.sort(key=key, reverse=kind.startswith("strong_"))
@@ -295,11 +295,8 @@ def run_edge_attack(
         # Flux precompute (RW / Evo).
         if kind in ("flux_high_rw", "flux_high_evo", "flux_high_rw_x_neg_ricci"):
             flow_mode = "evo" if kind.endswith("_evo") else "rw"
-            try:
-                _ne, ef = compute_energy_flow(H0, steps=20, flow_mode=flow_mode, damping=1.0)
-                flux = dict(ef)
-            except (ValueError, RuntimeError):
-                flux = {}
+            _ne, ef = compute_energy_flow(H0, steps=20, flow_mode=flow_mode, damping=1.0)
+            flux = dict(ef)
 
         # Curvature on sampled edges.
         if kind.startswith("ricci_") or kind == "flux_high_rw_x_neg_ricci":
@@ -323,16 +320,16 @@ def run_edge_attack(
 
         def flux_uv(u, v) -> float:
             if (u, v) in flux:
-                return _safe_float(flux[(u, v)], 0.0)
+                return float(flux[(u, v)])
             if (v, u) in flux:
-                return _safe_float(flux[(v, u)], 0.0)
+                return float(flux[(v, u)])
             return 0.0
 
         def kappa_uv(u, v) -> float:
             if (u, v) in kappa:
-                return _safe_float(kappa[(u, v)], 0.0)
+                return float(kappa[(u, v)])
             if (v, u) in kappa:
-                return _safe_float(kappa[(v, u)], 0.0)
+                return float(kappa[(v, u)])
             return 0.0
 
         def score(u, v, d) -> float:

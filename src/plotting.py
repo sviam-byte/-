@@ -37,10 +37,7 @@ def fig_metrics_over_steps(
 
     fig.update_layout(template="plotly_dark", title=title, xaxis_title=x_title, yaxis_title="value")
     fig.update_layout(height=int(height))
-    try:
-        fig.update_traces(mode="lines", line=dict(width=3))
-    except Exception:
-        pass
+    fig.update_traces(mode="lines", line=dict(width=3))
     return fig
 
 
@@ -61,10 +58,7 @@ def fig_compare_attacks(
         fig.add_trace(go.Scatter(x=d[x_col], y=d[y_col], name=name))
     fig.update_layout(template="plotly_dark", title=title, xaxis_title=x_col, yaxis_title=y_col)
     fig.update_layout(height=int(height))
-    try:
-        fig.update_traces(mode="lines", line=dict(width=3))
-    except Exception:
-        pass
+    fig.update_traces(mode="lines", line=dict(width=3))
     return fig
 
 
