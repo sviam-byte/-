@@ -31,7 +31,8 @@ def entropy_histogram(x, bins="fd") -> float:
         return float("nan")
     hist, _ = np.histogram(x, bins=bins)
     # SciPy handles normalization internally; we keep the raw counts for clarity.
-    return float(scipy_entropy(hist))
+    # Guard against tiny negative values due to floating error.
+    return abs(float(scipy_entropy(hist)))
 
 
 def entropy_degree(G: nx.Graph) -> float:
@@ -40,7 +41,8 @@ def entropy_degree(G: nx.Graph) -> float:
     if degrees.size == 0:
         return float("nan")
     _, counts = np.unique(degrees, return_counts=True)
-    return float(scipy_entropy(counts))
+    # Guard against tiny negative values due to floating error.
+    return abs(float(scipy_entropy(counts)))
 
 
 def entropy_weights(G: nx.Graph) -> float:
@@ -424,11 +426,16 @@ def evolutionary_entropy_demetrius(G: nx.Graph, base: float = math.e) -> float:
         idx = int(np.argmax(np.real(vals)))
         lam = float(np.real(vals[idx]))
         u = np.real(vecs[:, idx])
-        vals2, vecs2 = np.linalg.eig(Ad.T)
-        idx2 = int(np.argmax(np.real(vals2)))
-        v = np.real(vecs2[:, idx2])
+        # Для симметричной матрицы (неориентированный граф) u == v.
+        v = u
     else:
-        lam, u, v = _pf_eigs_sparse(A)
+        # Для undirected графа достаточно правого собственного вектора.
+        import scipy.sparse.linalg as spla
+
+        vals_r, vecs_r = spla.eigs(A, k=1, which="LR")
+        lam = float(np.real(vals_r[0]))
+        u = np.real(vecs_r[:, 0])
+        v = u
 
     if not np.isfinite(lam) or lam <= 0:
         return float("nan")

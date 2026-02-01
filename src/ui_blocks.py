@@ -6,10 +6,12 @@ import plotly.express as px
 
 from .config_loader import load_css, load_metrics_info
 
+
 def help_icon(key: str) -> str:
     """Короткая справка для Streamlit metrics/plots."""
     info = load_metrics_info()
     return info.get("help_text", {}).get(key, "")
+
 
 def inject_custom_css() -> None:
     """Подключить общий CSS один раз на запуск."""
@@ -17,6 +19,29 @@ def inject_custom_css() -> None:
     if not css:
         return
     st.markdown(f"<style>\n{css}\n</style>", unsafe_allow_html=True)
+
+
+def fmt(val, precision=4, is_percent=False):
+    """Safe formatter for metrics: handles NaN/None/Zero nicely."""
+    if val is None:
+        return "—"
+    try:
+        f = float(val)
+    except (TypeError, ValueError):
+        return str(val)
+
+    if not np.isfinite(f):
+        return "—"
+
+    if is_percent:
+        return f"{f * 100:.1f}%"
+
+    # Handle negative zero.
+    if f == 0.0:
+        f = 0.0
+
+    return f"{f:.{precision}f}"
+
 
 def render_dashboard_metrics(G_view, met: dict) -> None:
     """Render grouped metric cards on the dashboard."""
@@ -26,8 +51,8 @@ def render_dashboard_metrics(G_view, met: dict) -> None:
         k1, k2, k3, k4 = st.columns(4)
         k1.metric("N (Nodes)", met.get("N", G_view.number_of_nodes()), help=help_icon("N"))
         k2.metric("E (Edges)", met.get("E", G_view.number_of_edges()), help=help_icon("E"))
-        k3.metric("Density", f"{float(met.get('density', 0.0)):.6f}", help=help_icon("Density"))
-        k4.metric("Avg Degree", f"{float(met.get('avg_degree', 0.0)):.2f}")
+        k3.metric("Density", fmt(met.get("density"), 6), help=help_icon("Density"))
+        k4.metric("Avg Degree", fmt(met.get("avg_degree"), 2))
 
     # Card 2: Connectivity
     with st.container(border=True):
@@ -36,29 +61,29 @@ def render_dashboard_metrics(G_view, met: dict) -> None:
         c1.metric("Components", met.get("C", "N/A"))
         c2.metric(
             "LCC Size",
-            met.get("lcc_size", "N/A"),
-            f"{float(met.get('lcc_frac', 0.0)) * 100:.1f}%",
+            fmt(met.get("lcc_size"), 0),
+            fmt(met.get("lcc_frac"), is_percent=True),
             help=help_icon("LCC frac"),
         )
-        c3.metric("Diameter (approx)", met.get("diameter_approx", "N/A"))
-        c4.metric("Efficiency", f"{float(met.get('eff_w', 0.0)):.4f}", help=help_icon("Efficiency"))
+        c3.metric("Diameter (approx)", fmt(met.get("diameter_approx"), 0))
+        c4.metric("Efficiency", fmt(met.get("eff_w")), help=help_icon("Efficiency"))
 
     # Card 3: Topology
     with st.container(border=True):
         st.markdown("#### 🕸️ Топология и Спектр")
         m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Modularity Q", f"{float(met.get('mod', 0.0)):.4f}", help=help_icon("Modularity Q"))
-        m2.metric("Lambda2 (LCC)", f"{float(met.get('l2_lcc', 0.0)):.6f}", help=help_icon("Lambda2"))
-        m3.metric("Assortativity", f"{float(met.get('assortativity', 0.0)):.4f}", help=help_icon("Assortativity"))
-        m4.metric("Clustering", f"{float(met.get('clustering', 0.0)):.4f}", help=help_icon("Clustering"))
+        m1.metric("Modularity Q", fmt(met.get("mod")), help=help_icon("Modularity Q"))
+        m2.metric("Lambda2 (LCC)", fmt(met.get("l2_lcc"), 6), help=help_icon("Lambda2"))
+        m3.metric("Assortativity", fmt(met.get("assortativity")), help=help_icon("Assortativity"))
+        m4.metric("Clustering", fmt(met.get("clustering")), help=help_icon("Clustering"))
 
     # Card 4: Entropy & Robustness
     with st.container(border=True):
         st.markdown("#### 🎲 Энтропия и Устойчивость")
         e1, e2, e3 = st.columns(3)
-        e1.metric("H_deg", f"{float(met.get('H_deg', float('nan'))):.4f}", help=help_icon("H_deg"))
-        e2.metric("H_w", f"{float(met.get('H_w', float('nan'))):.4f}", help=help_icon("H_w"))
-        e3.metric("H_conf", f"{float(met.get('H_conf', float('nan'))):.4f}", help=help_icon("H_conf"))
+        e1.metric("H_deg", fmt(met.get("H_deg")), help=help_icon("H_deg"))
+        e2.metric("H_w", fmt(met.get("H_w")), help=help_icon("H_w"))
+        e3.metric("H_conf", fmt(met.get("H_conf")), help=help_icon("H_conf"))
 
         with st.expander("❔", expanded=False):
             st.markdown(
@@ -69,30 +94,30 @@ def render_dashboard_metrics(G_view, met: dict) -> None:
 
         st.divider()
         a1, a2, a3 = st.columns(3)
-        a1.metric("τ (Relaxation)", f"{float(met.get('tau_relax', float('nan'))):.4g}", help=help_icon("tau_relax"))
-        a2.metric("β (Redundancy)", f"{float(met.get('beta_red', float('nan'))):.4f}", help=help_icon("beta_red"))
-        a3.metric("1/λ_max (Epi thr)", f"{float(met.get('epi_thr', float('nan'))):.4g}", help=help_icon("epi_thr"))
+        a1.metric("τ (Relaxation)", fmt(met.get("tau_relax")), help=help_icon("tau_relax"))
+        a2.metric("β (Redundancy)", fmt(met.get("beta_red")), help=help_icon("beta_red"))
+        a3.metric("1/λ_max (Epi thr)", fmt(met.get("epi_thr")), help=help_icon("epi_thr"))
 
     # Card 5: Advanced Geometry
     st.subheader("🧭 Геометрия / робастность")
 
     g1, g2, g3, g4 = st.columns(4)
-    g1.metric("H_rw (entropy rate)", f"{float(met.get('H_rw', float('nan'))):.4f}", help=help_icon("H_rw"))
-    g2.metric("H_evo (Demetrius)", f"{float(met.get('H_evo', float('nan'))):.4f}", help=help_icon("H_evo"))
-    g3.metric("κ̄ (mean Ricci)", f"{float(met.get('kappa_mean', float('nan'))):.4f}", help=help_icon("kappa_mean"))
+    g1.metric("H_rw (entropy rate)", fmt(met.get("H_rw")), help=help_icon("H_rw"))
+    g2.metric("H_evo (Demetrius)", fmt(met.get("H_evo")), help=help_icon("H_evo"))
+    g3.metric("κ̄ (mean Ricci)", fmt(met.get("kappa_mean")), help=help_icon("kappa_mean"))
     g4.metric(
         "% κ<0",
-        f"{100.0 * float(met.get('kappa_frac_negative', float('nan'))):.1f}%",
+        fmt(met.get("kappa_frac_negative"), is_percent=True),
         help=help_icon("kappa_frac_negative"),
     )
 
     h1, h2, h3, h4 = st.columns(4)
-    h1.metric("Frag(H_rw)", f"{float(met.get('fragility_H', float('nan'))):.4g}", help=help_icon("fragility_H"))
+    h1.metric("Frag(H_rw)", fmt(met.get("fragility_H")), help=help_icon("fragility_H"))
     h2.metric(
-        "Frag(H_evo)", f"{float(met.get('fragility_evo', float('nan'))):.4g}", help=help_icon("fragility_evo")
+        "Frag(H_evo)", fmt(met.get("fragility_evo")), help=help_icon("fragility_evo")
     )
     h3.metric(
-        "Frag(κ̄)", f"{float(met.get('fragility_kappa', float('nan'))):.4g}", help=help_icon("fragility_kappa")
+        "Frag(κ̄)", fmt(met.get("fragility_kappa")), help=help_icon("fragility_kappa")
     )
     h4.metric(
         "κ edges (ok/skip)",

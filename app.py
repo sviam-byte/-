@@ -1123,8 +1123,7 @@ def tab_energy() -> None:
             # Layout.
             base_seed = int(seed_val) + int(st.session_state.get("layout_seed_bump", 0))
             pos3d_local = _layout_cached(
-                active_entry.id,
-                df_hash,
+                active_entry.edges,
                 src_col,
                 dst_col,
                 float(min_conf),
@@ -1142,8 +1141,7 @@ def tab_energy() -> None:
             cap_val = str(st.session_state.get("__phys_cap", "strength"))
 
             node_frames, edge_frames = _energy_frames_cached(
-                active_entry.id,
-                df_hash,
+                active_entry.edges,
                 src_col,
                 dst_col,
                 float(min_conf),
@@ -1226,8 +1224,7 @@ def tab_structure() -> None:
         # 1) Получаем pos3d (режимы остаются детерминированными через seed).
         if layout_mode.startswith("Fixed"):
             pos3d = _layout_cached(
-                active_entry.id,
-                df_hash,
+                active_entry.edges,
                 src_col,
                 dst_col,
                 float(min_conf),
@@ -1237,8 +1234,7 @@ def tab_structure() -> None:
             )
         else:
             pos3d = _layout_cached(
-                active_entry.id,
-                df_hash,
+                active_entry.edges,
                 src_col,
                 dst_col,
                 float(min_conf),
@@ -1706,8 +1702,7 @@ def tab_attack_lab() -> None:
 
             base_seed = int(seed_val) + int(st.session_state.get("layout_seed_bump", 0))
             pos_base = _layout_cached(
-                active_entry.id,
-                df_hash,
+                active_entry.edges,
                 src_col,
                 dst_col,
                 float(min_conf),
