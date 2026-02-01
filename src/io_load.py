@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 
 import pandas as pd
+from pandas.errors import ParserError
 
 def load_uploaded_any(file_bytes: bytes, filename: str) -> pd.DataFrame:
     """Load uploaded bytes into a DataFrame for CSV or Excel inputs."""
@@ -15,14 +16,13 @@ def load_uploaded_any(file_bytes: bytes, filename: str) -> pd.DataFrame:
         # Try utf-8 with replacement; fallback to cp1251 for legacy files.
         try:
             df = pd.read_csv(bio, sep=None, engine="python", encoding_errors="replace")
-        except Exception:
+        except (UnicodeDecodeError, ParserError):
             bio.seek(0)
             df = pd.read_csv(
                 bio,
                 sep=None,
                 engine="python",
                 encoding="cp1251",
-                encoding_errors="replace",
             )
 
     df.columns = [str(c).strip() for c in df.columns]

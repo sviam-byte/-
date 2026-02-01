@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 import random
-from typing import Any
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -328,19 +328,18 @@ def calculate_metrics(
 
 
 def compute_3d_layout(G: nx.Graph, seed: int) -> dict:
+    """Compute a 3D spring layout with deterministic seeding."""
     if G.number_of_nodes() == 0:
         return {}
-    return nx.spring_layout(G, dim=3, weight="weight", seed=int(seed))
+    return nx.spring_layout(G, dim=3, weight="weight", seed=seed)
 
 
-def _normalize_edge_weights(G: nx.Graph) -> nx.Graph:
-    """Ensure every edge has a positive finite weight to keep metrics stable."""
-    for _, _, d in G.edges(data=True):
+def validate_edge_weights(G: nx.Graph) -> None:
+    """Validate edge weights are finite and positive to keep metrics stable."""
+    for u, v, d in G.edges(data=True):
         w = float(d.get("weight", 1.0))
         if not np.isfinite(w) or w <= 0:
-            w = 1.0
-        d["weight"] = w
-    return G
+            raise ValueError(f"bad edge weight on ({u!r}, {v!r}): {w!r}")
 
 
 def _rw_transition_matrix(G: nx.Graph, nodes: List) -> np.ndarray:
@@ -432,7 +431,8 @@ def compute_energy_flow(
         - Uses dense matrices; prefer modest graph sizes for interactive 3D usage.
         - If sources are not provided, we seed energy at the highest-strength node.
     """
-    H = _normalize_edge_weights(as_simple_undirected(G))
+    H = as_simple_undirected(G)
+    validate_edge_weights(H)
     nodes = list(H.nodes())
     if not nodes:
         return {}, {}
@@ -494,7 +494,8 @@ def _simulate_energy_physical(
     leak: float = 0.02,
 ) -> Tuple[List[Dict], List[Dict[Tuple, float]]]:
     """Pressure/flow simulator with a stable dt for smoother dynamics."""
-    H = _normalize_edge_weights(as_simple_undirected(G))
+    H = as_simple_undirected(G)
+    validate_edge_weights(H)
     nodes = list(H.nodes())
     if not nodes:
         return [], []
@@ -605,7 +606,8 @@ def simulate_energy_flow(
             leak=float(phys_leak),
         )
 
-    H = _normalize_edge_weights(as_simple_undirected(G))
+    H = as_simple_undirected(G)
+    validate_edge_weights(H)
     nodes = list(H.nodes())
     if not nodes:
         return [], []
