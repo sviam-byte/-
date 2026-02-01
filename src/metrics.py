@@ -33,9 +33,15 @@ def spectral_radius_weighted_adjacency(G: nx.Graph) -> float:
     if G.number_of_nodes() == 0 or G.number_of_edges() == 0:
         return 0.0
     A = nx.adjacency_matrix(G, weight="weight").astype(float)
-    vals = spla.eigs(A, k=1, which="LR", return_eigenvectors=False)
-    lmax = float(np.real(vals[0]))
-    return max(0.0, lmax)
+    try:
+        # Для малых матриц лучше dense (numpy), ARPACK падает на N<3..5.
+        if A.shape[0] < 10:
+            vals = np.linalg.eigvals(A.toarray())
+            return float(np.max(np.abs(vals)))
+        vals = spla.eigs(A, k=1, which="LR", return_eigenvectors=False)
+        return float(np.abs(vals[0]))
+    except (spla.ArpackNoConvergence, spla.ArpackError, ValueError):
+        return 0.0
 
 
 def lambda2_on_lcc(G: nx.Graph) -> float:
@@ -53,14 +59,21 @@ def lambda2_on_lcc(G: nx.Graph) -> float:
     Hs = H.subgraph(lcc).copy()
     L = nx.normalized_laplacian_matrix(Hs, weight="weight").astype(float)
     # Shift-invert around sigma=0 to target smallest eigenvalues faster.
-    if L.shape[0] <= 2:
+    if L.shape[0] < 10:
         vals = np.sort(np.real(np.linalg.eigvals(L.toarray())))
         return float(max(0.0, vals[1])) if vals.size >= 2 else 0.0
-    vals = spla.eigs(L, k=2, which="SM", sigma=0, return_eigenvectors=False)
-    vals = np.sort(np.real(vals))
-    if vals.size >= 2:
-        return float(max(0.0, vals[1]))
-    return 0.0
+    try:
+        vals = spla.eigs(L, k=2, which="SM", sigma=1e-5, return_eigenvectors=False)
+        vals = np.sort(np.real(vals))
+        if vals.size >= 2:
+            return float(max(0.0, vals[1]))
+        return 0.0
+    except (spla.ArpackNoConvergence, spla.ArpackError, ValueError):
+        # Fallback to dense if sparse fails.
+        if L.shape[0] < 2000:
+            vals = np.sort(np.real(np.linalg.eigvals(L.toarray())))
+            return float(max(0.0, vals[1])) if vals.size >= 2 else 0.0
+        return 0.0
 
 
 def lcc_fraction(G: nx.Graph, N0: int) -> float:
@@ -163,10 +176,11 @@ def _shannon_entropy_from_counts(counts: np.ndarray) -> float:
     if s <= 0:
         return float("nan")
     p = counts / s
-    p = p[p > 0]
+    # Фильтруем нули, NaN и отрицательный мусор от float errors.
+    p = p[(p > 1e-15) & np.isfinite(p)]
     if p.size == 0:
         return float("nan")
-    return float(-np.sum(p * np.log(p)))
+    return abs(float(-np.sum(p * np.log(p))))
 
 
 def _shannon_entropy_from_values(values, bins: int = 32) -> float:
@@ -525,7 +539,9 @@ def _simulate_energy_physical(
 
     # === Physical hack: dt ===
     # dt controls flow smoothness; too large makes the system unstable.
-    dt = 0.15
+    # Берем адаптивный шаг, чтобы поток не срывался при больших весах.
+    max_w = max([d.get("weight", 1.0) for _, _, d in H.edges(data=True)] or [1.0])
+    dt = 0.1 / max(1.0, float(max_w))
 
     node_frames = []
     edge_frames = []

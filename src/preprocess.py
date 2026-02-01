@@ -29,10 +29,10 @@ def coerce_fixed_format(df_any: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
 
     df[CONF_COL] = pd.to_numeric(df[CONF_COL], errors="coerce")
 
-    df[WEIGHT_COL] = pd.to_numeric(
-        df[WEIGHT_COL].astype(str).str.replace(",", ".", regex=False),
-        errors="coerce",
-    )
+    # Оптимизация: не приводим весь столбец к str, если он уже числовой.
+    if not pd.api.types.is_numeric_dtype(df[WEIGHT_COL]):
+        df[WEIGHT_COL] = df[WEIGHT_COL].astype(str).str.replace(",", ".", regex=False)
+    df[WEIGHT_COL] = pd.to_numeric(df[WEIGHT_COL], errors="coerce")
 
     # unify columns
     out = df[[SRC_COL, DST_COL, CONF_COL, WEIGHT_COL]].copy()
