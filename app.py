@@ -32,7 +32,6 @@ import plotly.express as px
 
 from compute import compute_layout as compute_layout_cached
 from compute import compute_curvature as compute_curvature_cached
-from src.graph_wrapper import GraphWrapper
 from src.io_load import load_uploaded_any
 from src.preprocess import coerce_fixed_format, filter_edges
 from src.graph_build import build_graph_from_edges, lcc_subgraph
@@ -68,29 +67,26 @@ from src.state_models import (
     build_graph_entry,
 )
 from src.utils import as_simple_undirected, get_node_strength
-from src.graph_wrapper import GraphWrapper
 
 # -----------------------------
 # Streamlit caching helpers
 # -----------------------------
 @st.cache_data(show_spinner=False)
 def _filter_edges_cached(
-    graph_id: str,
-    df_hash: str,
+    edges: pd.DataFrame,
+    src_col: str,
+    dst_col: str,
     min_conf: float,
     min_weight: float,
 ) -> pd.DataFrame:
-    """Cache-friendly wrapper around filter_edges keyed by graph ID + data hash."""
-    entry: GraphEntry = st.session_state["graphs"][graph_id]
-    if entry.src_col == src_col and entry.dst_col == dst_col:
-        return entry.get_filtered_edges(min_conf, min_weight)
-    return filter_edges(entry.edges, src_col, dst_col, min_conf, min_weight)
+    """Cache-friendly wrapper around filter_edges keyed by data inputs."""
+    # cached functions must be pure: args -> result
+    return filter_edges(edges, src_col, dst_col, min_conf, min_weight)
 
 
 @st.cache_resource(show_spinner=False)
 def _build_graph_cached(
-    graph_id: str,
-    df_hash: str,
+    edges: pd.DataFrame,
     src_col: str,
     dst_col: str,
     min_conf: float,
@@ -98,7 +94,7 @@ def _build_graph_cached(
     analysis_mode: str,
 ) -> nx.Graph:
     """Build NetworkX graph once per filter + analysis mode settings."""
-    df_filtered = _filter_edges_cached(graph_id, df_hash, min_conf, min_weight)
+    df_filtered = _filter_edges_cached(edges, src_col, dst_col, min_conf, min_weight)
     G = build_graph_from_edges(df_filtered, src_col, dst_col)
     if analysis_mode.startswith("LCC"):
         G = lcc_subgraph(G)
@@ -107,8 +103,7 @@ def _build_graph_cached(
 
 @st.cache_data(show_spinner=False)
 def _metrics_cached(
-    graph_id: str,
-    df_hash: str,
+    edges: pd.DataFrame,
     src_col: str,
     dst_col: str,
     min_conf: float,
@@ -119,20 +114,19 @@ def _metrics_cached(
     curvature_sample_edges: int,
 ) -> dict:
     """Cache heavy metrics separately from graph construction."""
-    G = _build_graph_cached(graph_id, df_hash, src_col, dst_col, min_conf, min_weight, analysis_mode)
+    G = _build_graph_cached(edges, src_col, dst_col, min_conf, min_weight, analysis_mode)
     return calculate_metrics(
         G,
         eff_sources_k=settings.APPROX_EFFICIENCY_K,
-        seed=int(seed),
-        compute_curvature=bool(compute_curvature),
-        curvature_sample_edges=int(curvature_sample_edges),
+        seed=seed,
+        compute_curvature=compute_curvature,
+        curvature_sample_edges=curvature_sample_edges,
     )
 
 
 @st.cache_data(show_spinner=False)
 def _layout_cached(
-    graph_id: str,
-    df_hash: str,
+    edges: pd.DataFrame,
     src_col: str,
     dst_col: str,
     min_conf: float,
@@ -141,14 +135,13 @@ def _layout_cached(
     seed: int,
 ) -> dict:
     """Cache 3D layouts so layout recomputation does not block UI."""
-    G = _build_graph_cached(graph_id, df_hash, src_col, dst_col, min_conf, min_weight, analysis_mode)
-    return compute_3d_layout(G, seed=int(seed))
+    G = _build_graph_cached(edges, src_col, dst_col, min_conf, min_weight, analysis_mode)
+    return compute_3d_layout(G, seed=seed)
 
 
 @st.cache_data(show_spinner=False)
 def _energy_frames_cached(
-    graph_id: str,
-    df_hash: str,
+    edges: pd.DataFrame,
     src_col: str,
     dst_col: str,
     min_conf: float,
@@ -165,18 +158,18 @@ def _energy_frames_cached(
     rw_impulse: bool,
 ) -> tuple[list[dict], list[dict]]:
     """Cache heavy energy frames separately to avoid re-simulating on UI tweaks."""
-    G = _build_graph_cached(graph_id, df_hash, src_col, dst_col, min_conf, min_weight, analysis_mode)
+    G = _build_graph_cached(edges, src_col, dst_col, min_conf, min_weight, analysis_mode)
     src_list = list(sources) if sources else None
     node_frames, edge_frames = simulate_energy_flow(
         G,
-        steps=int(steps),
-        flow_mode=str(flow_mode),
-        damping=float(damping),
+        steps=steps,
+        flow_mode=flow_mode,
+        damping=damping,
         sources=src_list,
-        phys_injection=float(phys_injection),
-        phys_leak=float(phys_leak),
-        phys_cap_mode=str(phys_cap_mode),
-        rw_impulse=bool(rw_impulse),
+        phys_injection=phys_injection,
+        phys_leak=phys_leak,
+        phys_cap_mode=phys_cap_mode,
+        rw_impulse=rw_impulse,
     )
     return node_frames, edge_frames
 
@@ -200,11 +193,8 @@ def _get_graph_wrapper(graph_key: str, G: nx.Graph, active_entry: "GraphEntry") 
 
     if isinstance(existing, GraphWrapper):
         # Если граф тот же объект — можно переиспользовать wrapper.
-        try:
-            if existing.G is G:
-                return existing
-        except Exception:
-            pass
+        if existing.G is G:
+            return existing
 
     wrapper = GraphWrapper(G)
     st.session_state[key] = wrapper
@@ -891,8 +881,7 @@ load_graph = bool(st.session_state.pop("__do_load_graph", False))
 if load_graph:
     with st.spinner("Строю граф…"):
         G_full = _build_graph_cached(
-            active_entry.id,
-            df_hash,
+            active_entry.edges,
             src_col,
             dst_col,
             float(min_conf),
@@ -900,8 +889,7 @@ if load_graph:
             "Global (Весь граф)",
         )
         G_view = _build_graph_cached(
-            active_entry.id,
-            df_hash,
+            active_entry.edges,
             src_col,
             dst_col,
             float(min_conf),
@@ -911,16 +899,15 @@ if load_graph:
         graph_wrapper = _get_graph_wrapper(graph_key, G_view, active_entry)
     with st.spinner("Считаю метрики…"):
         met = _metrics_cached(
-            active_entry.id,
-            df_hash,
+            active_entry.edges,
             src_col,
             dst_col,
             float(min_conf),
             float(min_weight),
             analysis_mode,
-            int(seed_val),
+            seed_val,
             False,
-            int(st.session_state.get("__curvature_sample_edges", 80)),
+            st.session_state.get("__curvature_sample_edges", 80),
         )
     with st.spinner("Готовлю layout…"):
         # Cache a quick 2D layout explicitly on demand.
@@ -931,8 +918,7 @@ if load_graph:
     st.session_state[metrics_cache_key] = met
 elif metrics_cache_key in st.session_state:
     G_full = _build_graph_cached(
-        active_entry.id,
-        df_hash,
+        active_entry.edges,
         src_col,
         dst_col,
         float(min_conf),
@@ -940,8 +926,7 @@ elif metrics_cache_key in st.session_state:
         "Global (Весь граф)",
     )
     G_view = _build_graph_cached(
-        active_entry.id,
-        df_hash,
+        active_entry.edges,
         src_col,
         dst_col,
         float(min_conf),

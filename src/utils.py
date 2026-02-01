@@ -1,5 +1,3 @@
-"""Shared utility helpers for graph normalization and safe casting."""
-
 import networkx as nx
 import numpy as np
 
@@ -34,10 +32,8 @@ def get_node_strength(G: nx.Graph, n) -> float:
     """Сумма весов всех инцидентных рёбер узла."""
     strength = 0.0
     for _, _, d in G.edges(n, data=True):
-        w_raw = d.get("weight", 1.0)
-        try:
-            w = float(w_raw)
-        except (TypeError, ValueError):
-            w = 1.0
-        strength += w if np.isfinite(w) else 1.0
-    return float(strength)
+        w = float(d.get("weight", 1.0))
+        if not np.isfinite(w):
+            raise ValueError(f"non-finite edge weight for node={n}: {w!r}")
+        strength += w
+    return strength
