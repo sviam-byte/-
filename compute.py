@@ -8,19 +8,25 @@ from src.config import settings
 from src.graph_wrapper import GraphWrapper
 
 
+# Streamlit не использует __hash__ пользовательских объектов, поэтому без hash_funcs
+# он будет хэшировать GraphWrapper через __dict__ и упрётся в nx.Graph, который не
+# поддерживает потоковый хэшер Streamlit (UnhashableParamError).
+_HASH_FUNCS = {GraphWrapper: lambda w: w.get_version()}
+
+
 @st.cache_resource(show_spinner=False)
 def build_graph(df: pd.DataFrame) -> nx.Graph:
     """Build a NetworkX graph from a pandas edge list (cached by dataframe content)."""
     return nx.from_pandas_edgelist(df, "src", "dst", edge_attr=True)
 
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, hash_funcs=_HASH_FUNCS)
 def compute_layout(wrapper: GraphWrapper) -> dict:
     """Compute and cache a deterministic 2D layout for quick preview plots."""
     return nx.spring_layout(wrapper.G, seed=settings.DEFAULT_SEED)
 
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, hash_funcs=_HASH_FUNCS)
 def compute_curvature(
     wrapper: GraphWrapper,
     sample_edges: int = 150,
