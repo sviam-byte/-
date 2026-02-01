@@ -12,17 +12,27 @@ def as_simple_undirected(G: nx.Graph) -> nx.Graph:
         H = H.to_undirected(as_view=False)
 
     if isinstance(H, (nx.MultiGraph, nx.MultiDiGraph)):
+        # Склеиваем мульти-рёбра: суммируем веса и сохраняем первый набор атрибутов.
+        # Это сохраняет поведение "aggregate weight", но избегает has_edge для каждого ребра.
         simple = nx.Graph()
         simple.add_nodes_from(H.nodes(data=True))
+        edge_weights = {}
+        edge_attrs = {}
+        edge_nodes = {}
         for u, v, d in H.edges(data=True):
             w = d.get("weight", 1.0)
+            key = frozenset((u, v))
+            edge_weights[key] = float(edge_weights.get(key, 0.0)) + float(w)
+            # Сохраняем атрибуты первого ребра как базовые.
+            if key not in edge_attrs:
+                edge_attrs[key] = dict(d)
+                edge_nodes[key] = (u, v)
 
-            if simple.has_edge(u, v):
-                simple[u][v]["weight"] += w
-            else:
-                edge_attrs = dict(d)
-                edge_attrs["weight"] = w
-                simple.add_edge(u, v, **edge_attrs)
+        for key, w in edge_weights.items():
+            u, v = edge_nodes[key]
+            attrs = edge_attrs[key]
+            attrs["weight"] = w
+            simple.add_edge(u, v, **attrs)
         return simple
 
     return nx.Graph(H)
