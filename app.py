@@ -1,5 +1,8 @@
-import streamlit as st
+from __future__ import annotations
+
 import logging
+
+import streamlit as st
 
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(name)s: %(message)s')
@@ -66,6 +69,7 @@ from src.state_models import (
     build_experiment_entry,
     build_graph_entry,
 )
+from src.graph_wrapper import GraphWrapper
 from src.utils import as_simple_undirected, get_node_strength
 
 # -----------------------------
@@ -182,7 +186,7 @@ def _quick_counts(df: pd.DataFrame, src_col: str, dst_col: str) -> tuple[int, in
     return int(len(nodes)), int(len(df))
 
 
-def _get_graph_wrapper(graph_key: str, G: nx.Graph, active_entry: "GraphEntry") -> GraphWrapper:
+def _get_graph_wrapper(graph_key: str, G: nx.Graph, active_entry: GraphEntry) -> GraphWrapper:
     """Get (or create) a GraphWrapper stored in session_state.
 
     GraphWrapper нужен, чтобы Streamlit не пытался хэшировать весь граф (это очень дорого).
