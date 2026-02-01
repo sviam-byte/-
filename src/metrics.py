@@ -1081,6 +1081,8 @@ def make_3d_traces(
       - 'weight': edge weight overlay (log10)
       - 'confidence': edge confidence overlay
       - 'none': base grey edges only
+
+    OPTIMIZED: Limits displayed base edges to prevent browser overload.
     """
     if G.number_of_nodes() == 0:
         return [], None
@@ -1111,12 +1113,22 @@ def make_3d_traces(
 
     # base grey edges (all)
     ex, ey, ez = [], [], []
-    for a, b, _ in G.edges(data=True):
+    # ОПТИМИЗАЦИЯ: если ребер слишком много, рисуем только случайную выборку.
+    # Иначе 10k+ ребер дают огромный JSON и могут подвесить вкладку.
+    all_edges = list(G.edges())
+    max_edges_viz = 2500
+    if len(all_edges) > max_edges_viz:
+        viz_edges = random.sample(all_edges, max_edges_viz)
+    else:
+        viz_edges = all_edges
+
+    for a, b in viz_edges:
         if a not in pos3d or b not in pos3d:
             continue
-        ex += [pos3d[a][0], pos3d[b][0], None]
-        ey += [pos3d[a][1], pos3d[b][1], None]
-        ez += [pos3d[a][2], pos3d[b][2], None]
+        # Используем extend вместо += [...] (немного быстрее на больших списках).
+        ex.extend((pos3d[a][0], pos3d[b][0], None))
+        ey.extend((pos3d[a][1], pos3d[b][1], None))
+        ez.extend((pos3d[a][2], pos3d[b][2], None))
 
     base_edges = go.Scatter3d(
         x=ex, y=ey, z=ez,
@@ -1132,7 +1144,7 @@ def make_3d_traces(
 
     if overlay_mode in ("weight", "confidence"):
         edge_values: Dict[Tuple, float] = {}
-        for u, v, d in G.edges(data=True):
+        for u, v, d in G.edges(data=True):  # Здесь перебор всех ok, это только расчет цвета.
             if u not in pos3d or v not in pos3d:
                 continue
             if overlay_mode == "confidence":
@@ -1173,13 +1185,13 @@ def make_3d_traces(
         if k is None or not np.isfinite(k):
             continue
         if k < 0:
-            negx += [pos3d[a][0], pos3d[b][0], None]
-            negy += [pos3d[a][1], pos3d[b][1], None]
-            negz += [pos3d[a][2], pos3d[b][2], None]
+            negx.extend((pos3d[a][0], pos3d[b][0], None))
+            negy.extend((pos3d[a][1], pos3d[b][1], None))
+            negz.extend((pos3d[a][2], pos3d[b][2], None))
         elif k > 0:
-            posx += [pos3d[a][0], pos3d[b][0], None]
-            posy += [pos3d[a][1], pos3d[b][1], None]
-            posz += [pos3d[a][2], pos3d[b][2], None]
+            posx.extend((pos3d[a][0], pos3d[b][0], None))
+            posy.extend((pos3d[a][1], pos3d[b][1], None))
+            posz.extend((pos3d[a][2], pos3d[b][2], None))
 
     neg_edges = go.Scatter3d(
         x=negx, y=negy, z=negz,
