@@ -187,8 +187,15 @@ def network_entropy_rate(G: nx.Graph, base: float = math.e) -> float:
     inv_d = np.reciprocal(d, out=np.zeros_like(d), where=d > 0)
     P = A.multiply(inv_d[:, None])
 
-    # Use SciPy entropy for clarity; convert to dense once for row-wise entropy.
-    row_ents = scipy_entropy(P.toarray(), axis=1, base=base)
+    # Считаем энтропию напрямую на разреженных данных, без toarray():
+    # H(row) = -sum(p * log(p)). Учитываем только ненулевые элементы.
+    data_log = np.log(P.data + 1e-20) / np.log(base)
+    ent_data = -(P.data * data_log)
+
+    # Перекладываем энтропийные веса в копию разреженной матрицы и суммируем по строкам.
+    P_ent = P.copy()
+    P_ent.data = ent_data
+    row_ents = np.asarray(P_ent.sum(axis=1)).flatten()
     return float(np.sum((d / total_s) * row_ents))
 
 

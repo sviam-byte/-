@@ -217,6 +217,44 @@ def _get_graph_wrapper(graph_key: str, G: nx.Graph, active_entry: GraphEntry) ->
 inject_custom_css()
 METRIC_HELP = load_metrics_info().get('metric_help', {})
 
+# Локальные UI-правки: превращаем radiogroup в табы (визуально удобнее).
+# Важно: это дополняет базовый CSS из src/ui_blocks.py, а не заменяет его.
+st.markdown(
+    """
+    <style>
+    div[role="radiogroup"] {
+        flex-direction: row;
+        justify-content: center;
+        width: 100%;
+    }
+    div[data-testid="stMarkdownContainer"] p {
+        font-size: 1.1rem;
+    }
+    div[role="radiogroup"] label {
+        background: #262730;
+        padding: 10px 20px;
+        border-radius: 8px;
+        margin: 0 5px;
+        border: 1px solid #444;
+        transition: 0.3s;
+        flex-grow: 1;
+        text-align: center;
+        justify-content: center;
+    }
+    div[role="radiogroup"] label[data-checked="true"] {
+        background: #ff4b4b !important;
+        color: white !important;
+        border-color: #ff4b4b !important;
+        font-weight: bold;
+    }
+    div[role="radiogroup"] label:hover {
+        border-color: #ff4b4b;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 ATTACK_PRESETS_NODE = {
     "Node core suite (быстро)": [
         {"kind": "random", "seeds": 3},
@@ -721,14 +759,6 @@ def render_top_bar():
 
     if not graphs:
         st.warning("⚠️ Workspace пуст. Загрузите файл слева или создайте демо-граф.")
-        c1, c2, c3 = st.columns([1, 2, 1])
-        with c2:
-            if st.button("🎲 Создать демо-граф (ER)", use_container_width=True):
-                G_demo = make_er_gnm(200, 800, 42)
-                edges = [[u, v, 1.0, 1.0] for u, v in G_demo.edges()]
-                df_demo = pd.DataFrame(edges, columns=["src", "dst", "weight", "confidence"])
-                add_graph("Demo ER Graph", df_demo, "demo:ER", src_col="src", dst_col="dst")
-                st.rerun()
         st.markdown('</div>', unsafe_allow_html=True)
         return None
 
@@ -784,6 +814,33 @@ def render_top_bar():
     st.markdown('</div>', unsafe_allow_html=True)
     return entry
 
+def render_demo_sidebar() -> None:
+    """Рендерим блок с демо-графами (для быстрого старта без загрузки файлов)."""
+    st.subheader("🎲 Тестовые данные")
+    with st.expander("Создать демо-граф"):
+        demo_type = st.selectbox(
+            "Тип",
+            ["ER (Random)", "Barabasi (Hubs)", "Watts (Small World)"],
+            key="demo_graph_type",
+        )
+        if st.button("Создать", use_container_width=True, key="demo_graph_create"):
+            if "ER" in demo_type:
+                G_demo = make_er_gnm(250, 800, 42)
+            elif "Barabasi" in demo_type:
+                G_demo = nx.barabasi_albert_graph(250, 3, seed=42)
+            else:
+                G_demo = nx.watts_strogatz_graph(250, 6, 0.1, seed=42)
+
+            # Добавляем случайные веса для визуальной вариативности.
+            edges = []
+            for u, v in G_demo.edges():
+                w = 0.1 + 0.9 * np.random.rand()
+                edges.append([u, v, w, 1.0])
+
+            df_demo = pd.DataFrame(edges, columns=["src", "dst", "weight", "confidence"])
+            add_graph(f"Demo {demo_type}", df_demo, "demo", src_col="src", dst_col="dst")
+            st.rerun()
+
 active_entry = render_top_bar()
 if not active_entry:
     # Важно: не останавливаем приложение ДО создания табов.
@@ -807,6 +864,8 @@ if not active_entry:
         st.info("Сначала нужен граф в Workspace.")
     with tab_compare:
         st.info("Сначала нужны эксперименты/атаки.")
+    with st.sidebar:
+        render_demo_sidebar()
     st.stop()
 
 # ============================================================
@@ -837,6 +896,9 @@ if "__analysis_mode" not in st.session_state:
     st.session_state["__analysis_mode"] = "Global (Весь граф)"
 
 with st.sidebar:
+    render_demo_sidebar()
+    st.markdown("---")
+
     st.markdown("### 📊 Текущий граф")
     st.caption(f"ID: {active_entry.id}")
     c1, c2 = st.columns(2)

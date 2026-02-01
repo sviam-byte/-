@@ -198,6 +198,13 @@ def run_attack(
                 "step": i,
                 "removed_frac": len(removed_log) / N0,
                 "lcc_frac": lcc_fraction(G, N0),
+                # Унифицируем метрики (чтобы downstream не проверял ключи вручную).
+                "N": met.get("N", G.number_of_nodes()),
+                "E": met.get("E", G.number_of_edges()),
+                "eff_w": met.get("eff_w", np.nan),
+                "mod": met.get("mod", np.nan),
+                "l2_lcc": met.get("l2_lcc", np.nan),
+                "clustering": met.get("clustering", np.nan),
             }
         )
         history.append(met)
@@ -378,6 +385,7 @@ def run_edge_attack(
             "step": i,
             "removed_frac": float(removed_frac),
             "removed_k": int(k),
+            # Явно приводим типы, чтобы downstream-таблицы были стабильны.
             "N": int(metrics.get("N", H.number_of_nodes())),
             "E": int(metrics.get("E", H.number_of_edges())),
             "C": int(metrics.get("C", np.nan)) if "C" in metrics else np.nan,
