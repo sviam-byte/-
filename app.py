@@ -188,6 +188,28 @@ def _quick_counts(df: pd.DataFrame, src_col: str, dst_col: str) -> tuple[int, in
     nodes = pd.unique(pd.concat([df[src_col], df[dst_col]], ignore_index=True))
     return int(len(nodes)), int(len(df))
 
+
+def _get_graph_wrapper(graph_key: str, G: nx.Graph, active_entry: "GraphEntry") -> GraphWrapper:
+    """Get (or create) a GraphWrapper stored in session_state.
+
+    GraphWrapper нужен, чтобы Streamlit не пытался хэшировать весь граф (это очень дорого).
+    """
+    _ = active_entry  # оставлено для совместимости с текущим вызовом
+    key = f"graph_wrapper_{graph_key}"
+    existing = st.session_state.get(key)
+
+    if isinstance(existing, GraphWrapper):
+        # Если граф тот же объект — можно переиспользовать wrapper.
+        try:
+            if existing.G is G:
+                return existing
+        except Exception:
+            pass
+
+    wrapper = GraphWrapper(G)
+    st.session_state[key] = wrapper
+    return wrapper
+
 inject_custom_css()
 METRIC_HELP = load_metrics_info().get('metric_help', {})
 
