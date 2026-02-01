@@ -138,7 +138,7 @@ def _metrics_cached(
     )
 
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, hash_funcs={pd.DataFrame: _hash_df_fast})
 def _layout_cached(
     edges: pd.DataFrame,
     src_col: str,
@@ -153,7 +153,7 @@ def _layout_cached(
     return compute_3d_layout(G, seed=seed)
 
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, hash_funcs={pd.DataFrame: _hash_df_fast})
 def _energy_frames_cached(
     edges: pd.DataFrame,
     src_col: str,
@@ -1123,8 +1123,7 @@ def tab_energy() -> None:
             # Layout.
             base_seed = int(seed_val) + int(st.session_state.get("layout_seed_bump", 0))
             pos3d_local = _layout_cached(
-                active_entry.id,
-                df_hash,
+                df_edges,
                 src_col,
                 dst_col,
                 float(min_conf),
@@ -1142,8 +1141,7 @@ def tab_energy() -> None:
             cap_val = str(st.session_state.get("__phys_cap", "strength"))
 
             node_frames, edge_frames = _energy_frames_cached(
-                active_entry.id,
-                df_hash,
+                df_edges,
                 src_col,
                 dst_col,
                 float(min_conf),
@@ -1223,29 +1221,18 @@ def tab_structure() -> None:
         # Seed учитывает "анти-кэш" и делает layout детерминированным между перерисовками.
         base_seed = int(seed_val) + int(st.session_state.get("layout_seed_bump", 0))
 
-        # 1) Получаем pos3d (режимы остаются детерминированными через seed).
-        if layout_mode.startswith("Fixed"):
-            pos3d = _layout_cached(
-                active_entry.id,
-                df_hash,
-                src_col,
-                dst_col,
-                float(min_conf),
-                float(min_weight),
-                analysis_mode,
-                base_seed,
-            )
-        else:
-            pos3d = _layout_cached(
-                active_entry.id,
-                df_hash,
-                src_col,
-                dst_col,
-                float(min_conf),
-                float(min_weight),
-                analysis_mode,
-                base_seed,
-            )
+        # 1) Получаем pos3d.
+        # Fixed: якорим раскладку на исходном (Global) графе, чтобы она не "прыгала" при смене режима.
+        layout_mode_for_cache = "Global (Весь граф)" if layout_mode.startswith("Fixed") else analysis_mode
+        pos3d = _layout_cached(
+            df_edges,
+            src_col,
+            dst_col,
+            float(min_conf),
+            float(min_weight),
+            layout_mode_for_cache,
+            base_seed,
+        )
 
         edge_overlay = "ricci"
         flow_mode = "rw"
@@ -1705,14 +1692,14 @@ def tab_attack_lab() -> None:
                 edge_overlay = "none"
 
             base_seed = int(seed_val) + int(st.session_state.get("layout_seed_bump", 0))
+            # Для 3D-динамики атак/декомпозиции раскладку лучше фиксировать на исходном (Global) графе.
             pos_base = _layout_cached(
-                active_entry.id,
-                df_hash,
+                df_edges,
                 src_col,
                 dst_col,
                 float(min_conf),
                 float(min_weight),
-                analysis_mode,
+                "Global (Весь граф)",
                 base_seed,
             )
 
