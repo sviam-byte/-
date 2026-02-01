@@ -1,5 +1,8 @@
-import streamlit as st
+from __future__ import annotations
+
 import logging
+
+import streamlit as st
 
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(name)s: %(message)s')
@@ -66,12 +69,23 @@ from src.state_models import (
     build_experiment_entry,
     build_graph_entry,
 )
+from src.graph_wrapper import GraphWrapper
 from src.utils import as_simple_undirected, get_node_strength
 
 # -----------------------------
 # Streamlit caching helpers
 # -----------------------------
-@st.cache_data(show_spinner=False)
+def _hash_df_fast(df: pd.DataFrame) -> str:
+    """Return a stable hash for a DataFrame, using attrs to avoid re-hashing."""
+    # Streamlit по умолчанию хэширует DataFrame целиком — это дорого на больших графах.
+    # Поэтому сохраняем стабильный хэш в df.attrs и используем его как ключ кэша.
+    cached = df.attrs.get("_kodik_hash")
+    if isinstance(cached, str) and cached:
+        return cached
+    return hashlib.md5(pd.util.hash_pandas_object(df, index=True).values).hexdigest()
+
+
+@st.cache_data(show_spinner=False, hash_funcs={pd.DataFrame: _hash_df_fast})
 def _filter_edges_cached(
     edges: pd.DataFrame,
     src_col: str,
@@ -182,7 +196,7 @@ def _quick_counts(df: pd.DataFrame, src_col: str, dst_col: str) -> tuple[int, in
     return int(len(nodes)), int(len(df))
 
 
-def _get_graph_wrapper(graph_key: str, G: nx.Graph, active_entry: "GraphEntry") -> GraphWrapper:
+def _get_graph_wrapper(graph_key: str, G: nx.Graph, active_entry: GraphEntry) -> GraphWrapper:
     """Get (or create) a GraphWrapper stored in session_state.
 
     GraphWrapper нужен, чтобы Streamlit не пытался хэшировать весь граф (это очень дорого).
@@ -803,12 +817,17 @@ src_col = active_entry.src_col
 dst_col = active_entry.dst_col
 
 # Cache key should avoid hashing the full DataFrame repeatedly.
-df_hash = hashlib.md5(pd.util.hash_pandas_object(df_edges).values).hexdigest()
+if not df_edges.attrs.get("_kodik_hash"):
+    df_edges.attrs["_kodik_hash"] = hashlib.md5(
+        pd.util.hash_pandas_object(df_edges, index=True).values
+    ).hexdigest()
+df_hash = df_edges.attrs["_kodik_hash"]
 
 # Fast filtering (cached) and cheap counts. Full NetworkX graph is built lazily after user action.
 df_filtered = _filter_edges_cached(
-    active_entry.id,
-    df_hash,
+    df_edges,
+    src_col,
+    dst_col,
     float(min_conf),
     float(min_weight),
 )
