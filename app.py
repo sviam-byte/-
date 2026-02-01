@@ -75,7 +75,17 @@ from src.utils import as_simple_undirected, get_node_strength
 # -----------------------------
 # Streamlit caching helpers
 # -----------------------------
-@st.cache_data(show_spinner=False)
+def _hash_df_fast(df: pd.DataFrame) -> str:
+    """Return a stable hash for a DataFrame, using attrs to avoid re-hashing."""
+    # Streamlit по умолчанию хэширует DataFrame целиком — это дорого на больших графах.
+    # Поэтому сохраняем стабильный хэш в df.attrs и используем его как ключ кэша.
+    cached = df.attrs.get("_kodik_hash")
+    if isinstance(cached, str) and cached:
+        return cached
+    return hashlib.md5(pd.util.hash_pandas_object(df, index=True).values).hexdigest()
+
+
+@st.cache_data(show_spinner=False, hash_funcs={pd.DataFrame: _hash_df_fast})
 def _filter_edges_cached(
     edges: pd.DataFrame,
     src_col: str,
@@ -807,12 +817,17 @@ src_col = active_entry.src_col
 dst_col = active_entry.dst_col
 
 # Cache key should avoid hashing the full DataFrame repeatedly.
-df_hash = hashlib.md5(pd.util.hash_pandas_object(df_edges).values).hexdigest()
+if not df_edges.attrs.get("_kodik_hash"):
+    df_edges.attrs["_kodik_hash"] = hashlib.md5(
+        pd.util.hash_pandas_object(df_edges, index=True).values
+    ).hexdigest()
+df_hash = df_edges.attrs["_kodik_hash"]
 
 # Fast filtering (cached) and cheap counts. Full NetworkX graph is built lazily after user action.
 df_filtered = _filter_edges_cached(
-    active_entry.id,
-    df_hash,
+    df_edges,
+    src_col,
+    dst_col,
     float(min_conf),
     float(min_weight),
 )
